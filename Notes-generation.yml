@@ -4,47 +4,118 @@ pool:
   vmImage: 'ubuntu-latest'
 
 steps:
-- checkout: self  # Default checkout task to ensure the full history is cloned
+- task: PowerShell@2
+  displayName: "Generate Release Notes"
+  inputs:
+    targetType: 'inline'
+    script: |
+      #Write-Host "✅ Organization URL: $env:SYSTEM_COLLECTIONURI"
+      #Write-Host "✅ Project Name: $env:SYSTEM_TEAMPROJECT"
+      #Write-Host "✅ Repository Name: $env:BUILD_REPOSITORY_NAME"
+          
+      # Hardcode the Personal Access Token (PAT) for testing purposes
+      $ADO_PAT = "AMNGntv1LLRpLKlNL82zFDouDPYm5fu6fsFzl3GC0jTx80cHNMqQJQQJ99BBACAAAAAMVcP5AAASAZDO1Dur" 
+      
+      if (-not $ADO_PAT) {
+          Write-Host "ERROR: Personal Access Token (PAT) is missing."
+          exit 1
+      } else {
+          Write-Host "PAT is set."
+      }
 
-- script: |
-    echo "🔍 Fetching all tags..."
-    
-    # Directly set the PAT here for testing
-    PERSONAL_ACCESS_TOKEN="AMNGntv1LLRpLKlNL82zFDouDPYm5fu6fsFzl3GC0jTx80cHNMqQJQQJ99BBACAAAAAMVcP5AAASAZDO1Dur"  # Replace with your actual PAT
+      # Construct repository details
+      $orgUrl = $env:SYSTEM_COLLECTIONURI.TrimEnd('/')
+      $projectName = $env:SYSTEM_TEAMPROJECT
+      $repoName = $env:BUILD_REPOSITORY_NAME
 
-    # Set the Git URL to use the PAT for authentication
-    git config --global url."https://$PERSONAL_ACCESS_TOKEN@dev.azure.com".insteadOf "https://dev.azure.com"
-    
-    # Use the full Git URL with the PAT embedded in it
-    git clone https://$PERSONAL_ACCESS_TOKEN@dev.azure.com/chand1502877/DevOps_pro1/_git/App-03
-    
-    # Move to the project directory after cloning
-    cd App-03
+      # Ensure the domain part of the URL is included when forming the Git URL
+      if ($orgUrl -notmatch "dev.azure.com") {
+          Write-Host "Invalid Organization URL. Ensure it includes the domain (dev.azure.com)."
+          exit 1
+      }
 
-    # Fetch all tags from the repo
-    git fetch --tags  
+      # Correct Git URL format with the PAT for authentication
+      $authGitUrl = "https://$ADO_PAT@dev.azure.com/chand1502877/$projectName/_git/$repoName"
 
-    echo "🔍 Fetching commits between Tag_release_20Mar2025 and Tag_release_23Mar2025..."
-    
-    # Verify the repository and history
-    echo "✅ Verifying repository and history..."
-    git log --oneline --decorate --graph --all
+      git clone $authGitUrl
+      cd $repoName
 
-    # Fetch commits between the tags
-    COMMIT_LIST=$(git log --pretty=format:"%H" Tag_release_20Mar2025..Tag_release_23Mar2025)
-    
-    # Print commits to check
-    if [ -z "$COMMIT_LIST" ]; then
-      echo "⚠️ No commits found between the selected tags."
-      exit 1
-    fi
+      # Fetch latest and previous tags
+      #Write-Host " Fetching repository tags..."
+      $tags = git tag --sort=-creatordate
+      $latestTag = ($tags | Select-Object -First 1)
+      $previousTag = ($tags | Select-Object -Skip 1 -First 1)
 
-    echo "✅ Commits found:"
-    echo "$COMMIT_LIST"
+      if (-not $latestTag) {
+          #Write-Host " No tags found."
+          exit 1
+      }
 
-    # Split commits into an array and print them
-    IFS=$'\n' read -rd '' -a COMMITS <<< "$COMMIT_LIST"
-    for COMMIT in "${COMMITS[@]}"; do
-      echo "Commit: $COMMIT"
-    done
-  displayName: 'Fetch commits and display'
+      if (-not $previousTag) {
+          #Write-Host " Only one tag found, using first commit as previous tag."
+          $previousTag = (git rev-list --max-parents=0 HEAD)
+      }
+
+      # Fetch commits between tags
+      $commitList = git log --pretty=format:"%H" $previousTag..$latestTag
+
+      if (-not $commitList) {
+          #Write-Host "No commits found between tags."
+          # You can still generate release notes without commits
+          $commitList = "No commits between these tags."
+      }
+
+      # Fetch merged pull requests from Azure DevOps API
+      $prUrl = "$orgUrl/$projectName/_apis/git/repositories/$repoName/pullrequests?searchCriteria.status=completed&api-version=7.1-preview.1"
+      $prResponse = Invoke-RestMethod -Uri $prUrl -Headers @{Authorization=("Basic " + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$ADO_PAT")))} -Method Get
+      
+      if (-not $prResponse.value) {
+          #Write-Host " No merged PRs found."
+          $filteredPRs = @()
+      } else {
+          # Filter PRs based on commits
+          $filteredPRs = $prResponse.value | Where-Object { $commitList -contains $_.lastMergeCommit.commitId }
+      }
+
+      # Fetch work items linked to merged PRs
+      #Write-Host " Fetching Work Items..."
+      $workItems = @()
+      foreach ($pr in $filteredPRs) {
+          $prId = $pr.pullRequestId
+          $workItemUrl = "$orgUrl/$projectName/_apis/wit/workItems?ids=$prId&api-version=7.1-preview.1"
+          $workItemResponse = Invoke-RestMethod -Uri $workItemUrl -Headers @{Authorization=("Basic " + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$ADO_PAT")))} -Method Get
+          
+          if ($workItemResponse.value) {
+              $workItems += $workItemResponse.value
+          }
+      }
+
+      if (-not $workItems) {
+          #Write-Host "No work items found."
+      } else {
+          #Write-Host " Successfully retrieved Work Items."
+      }
+
+      # Generate Release Notes
+      #Write-Host " Generating Release Notes..."
+      $releaseNotes = @"
+      #  Release Notes ($latestTag)
+      =============================================
+
+      **Previous Tag:** $previousTag  
+      **Latest Tag:** $latestTag  
+      ###  Pull Requests Merged
+      $(if ($filteredPRs) { $filteredPRs | ForEach-Object { "- PR [$($_.pullRequestId)]: $($_.title)" } } else { "No PRs found." })
+
+      ###  Work Items
+      $(if ($workItems) { $workItems | ForEach-Object { "- WI #$($_.id): $($_.fields['System.Title'])" } } else { "No Work Items found." })
+
+      ###  Commits
+      $commitList
+      "@
+
+      # Save to file
+      $releaseNotes | Out-File -FilePath "release_notes.md" -Encoding utf8
+      Get-Content "release_notes.md"
+
+      Write-Host "Release Notes successfully generated."

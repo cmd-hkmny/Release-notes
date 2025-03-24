@@ -1,0 +1,50 @@
+trigger: none
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+steps:
+- checkout: self  # Default checkout task to ensure the full history is cloned
+
+- script: |
+    echo "🔍 Fetching all tags..."
+    
+    # Directly set the PAT here for testing
+    PERSONAL_ACCESS_TOKEN="AMNGntv1LLRpLKlNL82zFDouDPYm5fu6fsFzl3GC0jTx80cHNMqQJQQJ99BBACAAAAAMVcP5AAASAZDO1Dur"  # Replace with your actual PAT
+
+    # Set the Git URL to use the PAT for authentication
+    git config --global url."https://$PERSONAL_ACCESS_TOKEN@dev.azure.com".insteadOf "https://dev.azure.com"
+    
+    # Use the full Git URL with the PAT embedded in it
+    git clone https://$PERSONAL_ACCESS_TOKEN@dev.azure.com/chand1502877/DevOps_pro1/_git/App-03
+    
+    # Move to the project directory after cloning
+    cd App-03
+
+    # Fetch all tags from the repo
+    git fetch --tags  
+
+    echo "🔍 Fetching commits between Tag_release_20Mar2025 and Tag_release_23Mar2025..."
+    
+    # Verify the repository and history
+    echo "✅ Verifying repository and history..."
+    git log --oneline --decorate --graph --all
+
+    # Fetch commits between the tags
+    COMMIT_LIST=$(git log --pretty=format:"%H" Tag_release_20Mar2025..Tag_release_23Mar2025)
+    
+    # Print commits to check
+    if [ -z "$COMMIT_LIST" ]; then
+      echo "⚠️ No commits found between the selected tags."
+      exit 1
+    fi
+
+    echo "✅ Commits found:"
+    echo "$COMMIT_LIST"
+
+    # Split commits into an array and print them
+    IFS=$'\n' read -rd '' -a COMMITS <<< "$COMMIT_LIST"
+    for COMMIT in "${COMMITS[@]}"; do
+      echo "Commit: $COMMIT"
+    done
+  displayName: 'Fetch commits and display'

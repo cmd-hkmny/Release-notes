@@ -1,0 +1,33 @@
+# Load SMTP Credentials from Azure DevOps Variable Group
+$smtpUsername = "$(SMTP_USERNAME)"
+$smtpPassword = "$(SMTP_PASSWORD)"
+
+# Convert SMTP password securely
+$securePassword = ConvertTo-SecureString $smtpPassword -AsPlainText -Force
+$smtpCreds = New-Object System.Net.NetworkCredential($smtpUsername, $securePassword)
+
+# SMTP Server Configuration
+$smtpServer = "smtp.office365.com"  # Change for Gmail, AWS SES, etc.
+$smtpPort = "587"
+
+# Email Message
+$emailFrom = $smtpUsername
+$emailTo = "recipient@domain.com"
+$emailSubject = "Release Notes for $app ($latestTag)"
+$emailBody = $releaseNotes
+
+# Create Email Object
+$mailMessage = New-Object System.Net.Mail.MailMessage
+$mailMessage.From = $emailFrom
+$mailMessage.To.Add($emailTo)
+$mailMessage.Subject = $emailSubject
+$mailMessage.Body = $emailBody
+
+# Create SMTP Client
+$smtpClient = New-Object System.Net.Mail.SmtpClient($smtpServer, $smtpPort)
+$smtpClient.EnableSsl = $true
+$smtpClient.Credentials = $smtpCreds
+
+# Send Email
+$smtpClient.Send($mailMessage)
+Write-Host "✅ Email sent successfully for $app."

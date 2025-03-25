@@ -31,3 +31,28 @@ $smtpClient.Credentials = $smtpCreds
 # Send Email
 $smtpClient.Send($mailMessage)
 Write-Host "✅ Email sent successfully for $app."
+
+
+# Read Release Notes for Email Body
+      $emailBody = Get-Content "release_notes.md" -Raw
+
+      # Send Email via Azure DevOps REST API
+      $emailRecipients = @("recipient@example.com")  # Replace with actual recipients
+
+      $emailUrl = "$orgUrl/$projectName/_apis/notification?api-version=6.0"
+      $headers = @{
+          "Authorization" = "Basic " + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$ADO_PAT"))
+          "Content-Type"  = "application/json"
+      }
+
+      $emailPayload = @{
+          recipients = @(@{mail = $emailRecipients[0]})  # Supports multiple recipients
+          message = @{
+              subject = "Release Notes: $latestTag"
+              body    = $emailBody
+          }
+      } | ConvertTo-Json -Depth 3
+
+      Invoke-RestMethod -Uri $emailUrl -Headers $headers -Method Post -Body $emailPayload
+
+      Write-Host "📧 Email Sent Successfully!"

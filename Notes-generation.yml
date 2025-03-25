@@ -119,3 +119,22 @@ steps:
       Get-Content "release_notes.md"
 
       Write-Host "Release Notes successfully generated."
+            # Send email
+      $smtpServer = "smtp.office365.com"
+      $smtpPort = "587"
+      $emailFrom = "your-email@yourdomain.com"
+      $emailTo = "recipient-email@yourdomain.com"
+      $emailSubject = "Release Notes for $latestTag"
+      $emailBody = $releaseNotes
+
+      $smtpCreds = New-Object System.Management.Automation.PSCredential ("your-email@yourdomain.com", (ConvertTo-SecureString "YourEmailPassword" -AsPlainText -Force))
+      
+      Send-MailMessage -From $emailFrom -To $emailTo -Subject $emailSubject -Body $emailBody -SmtpServer $smtpServer -Port $smtpPort -UseSsl -Credential $smtpCreds
+      
+      Write-Host "Email sent successfully."
+
+- task: PublishBuildArtifacts@1
+  displayName: "Publish Release Notes as Artifact"
+  inputs:
+    pathToPublish: "$(Build.ArtifactStagingDirectory)/release_notes.md"
+    artifactName: "ReleaseNotes"

@@ -119,6 +119,29 @@ steps:
       Get-Content "release_notes.md"
 
       Write-Host "Release Notes successfully generated."
+      # Get SMTP Credentials from Variable Group
+      $smtpUsername = "$(SMTP_USERNAME)"
+      $smtpPassword = "$(SMTP_PASSWORD)"
+      
+      # Convert SMTP password securely
+      $securePassword = ConvertTo-SecureString $smtpPassword -AsPlainText -Force
+      $smtpCreds = New-Object System.Management.Automation.PSCredential ($smtpUsername, $securePassword)
+      
+      # SMTP Server Details (for Office 365, Gmail, etc.)
+      $smtpServer = "smtp.office365.com"   # Change this if using Gmail or another provider
+      $smtpPort = "587"
+      
+      # Email Details
+      $emailFrom = $smtpUsername
+      $emailTo = "recipient-email@yourdomain.com"
+      $emailSubject = "Release Notes for $app ($latestTag)"
+      $emailBody = $releaseNotes
+      
+      # Send Email
+      Send-MailMessage -From $emailFrom -To $emailTo -Subject $emailSubject -Body $emailBody -SmtpServer $smtpServer -Port $smtpPort -UseSsl -Credential $smtpCreds
+      
+      Write-Host "Email sent successfully for $app."
+
             # Send email
       $smtpServer = "smtp.office365.com"
       $smtpPort = "587"

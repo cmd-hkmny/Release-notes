@@ -1,0 +1,113 @@
+trigger: none
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+steps:
+- checkout: self  # Default checkout task to ensure the full history is cloned
+
+- task: PowerShell@2
+  displayName: "Generate Release Notes"
+  inputs:
+    targetType: 'inline'
+    script: |
+      # Configuration
+      $ORG_NAME = "chand1502877"
+      $PROJECT_NAME = "DevOps_pro1"
+      $REPO_NAME = "App-03"
+      $orgUrl = "https://dev.azure.com/$ORG_NAME"
+      $PERSONAL_ACCESS_TOKEN = "AMNGntv1LLRpLKlNL82zFDouDPYm5fu6fsFzl3GC0jTx80cHNMqQJQQJ99BBACAAAAAMVcP5AAASAZDO1Dur"
+      $authHeader = @{Authorization = "Basic " + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$PERSONAL_ACCESS_TOKEN"))}
+
+      Write-Host "✅ Organization: $ORG_NAME"
+      Write-Host "✅ Project: $PROJECT_NAME"
+      Write-Host "✅ Repository: $REPO_NAME"
+
+      # Clone repository
+      Write-Host "🔍 Cloning repository..."
+      $repoUrl = "https://$PERSONAL_ACCESS_TOKEN@dev.azure.com/$ORG_NAME/$PROJECT_NAME/_git/$REPO_NAME"
+      git clone $repoUrl
+      Set-Location $REPO_NAME
+
+      # Tag processing
+      Write-Host "🔖 Processing tags..."
+      $tags = git tag --sort=-creatordate
+      $latestTag = $tags | Select-Object -First 1
+      $previousTag = $tags | Select-Object -Skip 1 -First 1
+
+      if (-not $latestTag) {
+          Write-Host "❌ No tags found."
+          exit 1
+      }
+
+      if (-not $previousTag) {
+          Write-Host "⚠️ Only one tag found, using first commit as base."
+          $previousTag = git rev-list --max-parents=0 HEAD
+      }
+
+      Write-Host "🔖 Latest Tag: $latestTag"
+      Write-Host "🔖 Previous Tag: $previousTag"
+
+      # Get commits between tags
+      $commitList = git log --pretty=format:"%H" "${previousTag}..${latestTag}"
+
+      if (-not $commitList) {
+          Write-Host "⚠️ No commits found between tags."
+          exit 1
+      }
+
+      Write-Host "✅ Found $($commitList.Count) commits between tags"
+
+      # Get merged PRs
+      Write-Host "🔍 Fetching merged pull requests..."
+      $prUrl = "$orgUrl/$PROJECT_NAME/_apis/git/repositories/$REPO_NAME/pullrequests?searchCriteria.status=completed&api-version=7.1-preview.1"
+      $prResponse = Invoke-RestMethod -Uri $prUrl -Headers $authHeader -Method Get
+      
+      $filteredPRs = if ($prResponse.value) {
+          $prResponse.value | Where-Object { $commitList -contains $_.lastMergeCommit.commitId }
+      } else {
+          @()
+      }
+
+      Write-Host "✅ Found $($filteredPRs.Count) merged PRs in the range"
+
+      # Get work items for PRs
+      Write-Host "🔍 Fetching linked work items..."
+      $workItems = @()
+      foreach ($pr in $filteredPRs) {
+          try {
+              $prWorkItemsUrl = "$orgUrl/$PROJECT_NAME/_apis/git/repositories/$REPO_NAME/pullRequests/$($pr.pullRequestId)/workitems?api-version=7.1-preview.1"
+              $prWorkItems = Invoke-RestMethod -Uri $prWorkItemsUrl -Headers $authHeader -Method Get
+              
+              if ($prWorkItems.value) {
+                  $workItemIds = $prWorkItems.value.id -join ","
+                  $workItemUrl = "$orgUrl/_apis/wit/workitems?ids=$workItemIds&`$expand=relations&api-version=7.0"
+                  $workItemResponse = Invoke-RestMethod -Uri $workItemUrl -Headers $authHeader -Method Get
+                  
+                  if ($workItemResponse.value) {
+                      $workItems += $workItemResponse.value
+                  }
+              }
+          }
+          catch {
+              Write-Host "⚠️ Error processing PR $($pr.pullRequestId): $_"
+          }
+      }
+
+      # Output results
+      Write-Host "`n📋 Final Results:"
+      Write-Host "----------------"
+      Write-Host "🔹 Tags range: $previousTag..$latestTag"
+      Write-Host "🔹 Commits: $($commitList.Count)"
+      Write-Host "🔹 Merged PRs: $($filteredPRs.Count)"
+      Write-Host "🔹 Linked Work Items: $($workItems.Count)"
+
+      if ($workItems.Count -gt 0) {
+          Write-Host "`n📌 Work Item Details:"
+          foreach ($wi in $workItems) {
+              Write-Host "- [$($wi.fields.'System.WorkItemType') $($wi.id)] $($wi.fields.'System.Title')"
+              Write-Host "  URL: $orgUrl/$PROJECT_NAME/_workitems/edit/$($wi.id)"
+          }
+      }
+      
+      Write-Host "`n✅ Release notes generation completed"

@@ -56,3 +56,21 @@ Write-Host "✅ Email sent successfully for $app."
       Invoke-RestMethod -Uri $emailUrl -Headers $headers -Method Post -Body $emailPayload
 
       Write-Host "📧 Email Sent Successfully!"
+
+
+ Base64 encode PAT for authentication
+$base64AuthInfo = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$($pat)"))
+
+# Get commit hashes for both tags
+$startCommit = (Invoke-RestMethod -Uri "https://dev.azure.com/$org/$project/_apis/git/repositories/$repo/refs?filter=tags/$startTag&api-version=6.0" -Headers @{Authorization = "Basic $base64AuthInfo"}).value[0].objectId
+$endCommit = (Invoke-RestMethod -Uri "https://dev.azure.com/$org/$project/_apis/git/repositories/$repo/refs?filter=tags/$endTag&api-version=6.0" -Headers @{Authorization = "Basic $base64AuthInfo"}).value[0].objectId
+
+# Get all PRs merged between these commits
+$prs = Invoke-RestMethod -Uri "https://dev.azure.com/$org/$project/_apis/git/repositories/$repo/pullrequests?searchCriteria.status=completed&api-version=6.0" -Headers @{Authorization = "Basic $base64AuthInfo"}
+
+# Filter PRs between the two commits
+$filteredPRs = $prs.value | Where-Object {
+    $_.mergeCommit.commitId -ge $startCommit -and $_.mergeCommit.commitId -le $endCommit
+}
+
+$filteredPRs | Select-Object pullRequestId, title, createdBy, creationDate, status

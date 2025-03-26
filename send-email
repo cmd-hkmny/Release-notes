@@ -74,3 +74,62 @@ $filteredPRs = $prs.value | Where-Object {
 }
 
 $filteredPRs | Select-Object pullRequestId, title, createdBy, creationDate, status
+
+
+# 1. Get commit hashes
+try {
+    $olderRef = Invoke-RestMethod -Uri "https://dev.azure.com/$org/$project/_apis/git/repositories/$repo/refs?filter=tags/$olderTag&api-version=6.0" -Headers @{Authorization = "Basic $base64AuthInfo"}
+    $newerRef = Invoke-RestMethod -Uri "https://dev.azure.com/$org/$project/_apis/git/repositories/$repo/refs?filter=tags/$newerTag&api-version=6.0" -Headers @{Authorization = "Basic $base64AuthInfo"}
+    
+    $olderCommit = $olderRef.value[0].peeledObjectId
+    $newerCommit = $newerRef.value[0].peeledObjectId
+    
+    Write-Host "Commit range: $olderCommit (older) to $newerCommit (newer)"
+}
+catch {
+    Write-Host "Error getting tags: $_" -ForegroundColor Red
+    exit 1
+}
+
+# 2. Get all completed PRs
+try {
+    $prs = Invoke-RestMethod -Uri "https://dev.azure.com/$org/$project/_apis/git/repositories/$repo/pullrequests?searchCriteria.status=completed&api-version=6.0" -Headers @{Authorization = "Basic $base64AuthInfo"}
+    Write-Host "Found $($prs.value.Count) completed PRs total"
+}
+catch {
+    Write-Host "Error getting PRs: $_" -ForegroundColor Red
+    exit 1
+}
+
+# 3. Filter PRs
+$filteredPRs = @($prs.value | Where-Object {
+    $_.mergeCommit -and 
+    $_.mergeCommit.commitId -ge $olderCommit -and 
+    $_.mergeCommit.commitId -le $newerCommit
+})
+
+Write-Host "Found $($filteredPRs.Count) PRs in the specified range"
+
+# 4. Output results
+if ($filteredPRs.Count -gt 0) {
+    $filteredPRs | ForEach-Object {
+        [PSCustomObject]@{
+            PR_ID = $_.pullRequestId
+            Title = $_.title
+            Author = $_.createdBy.displayName
+            MergedCommit = $_.mergeCommit.commitId
+            MergeDate = $_.closedDate.ToString("yyyy-MM-dd")
+            Link = $_.url.Replace('_apis/git/repositories','_git').Replace('pullRequests','pullrequest')
+        }
+    } | Format-Table -AutoSize
+    
+    # Alternative raw output
+    Write-Host "`nRaw merge commit data for verification:"
+    $filteredPRs | Select-Object pullRequestId, @{n='mergeCommit';e={$_.mergeCommit.commitId}}
+}
+else {
+    Write-Host "No PRs found between these tags. Possible reasons:" -ForegroundColor Yellow
+    Write-Host "- Tags might not exist or are misspelled"
+    Write-Host "- No PRs were merged in this commit range"
+    Write-Host "- The mergeCommit property might be missing from PR objects"
+}

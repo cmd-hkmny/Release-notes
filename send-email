@@ -133,3 +133,10 @@ else {
     Write-Host "- No PRs were merged in this commit range"
     Write-Host "- The mergeCommit property might be missing from PR objects"
 }
+
+
+# Output the filtered PRs
+      Write-Host "`n Merged PRs between tags:"
+      foreach ($pr in $filteredPRs) {
+          Write-Host "🔹 PR $($pr.pullRequestId): $($pr.title) (Merge commit: $($pr.lastMergeCommit.commitId))"
+      }

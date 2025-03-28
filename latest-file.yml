@@ -1,0 +1,72 @@
+# Tag processing
+      $tags = git tag --sort=-creatordate
+      $latestTag = $tags | Select-Object -First 1
+      $previousTag = $tags | Select-Object -Skip 1 -First 1
+      if (-not $previousTag) { $previousTag = git rev-list --max-parents=0 HEAD }
+
+      # Get commits between tags
+      $commitList = git log --pretty=format:"%H" "${previousTag}..${latestTag}"
+      $commitCount = $commitList.Count
+      # Get merged PRs
+      $prResponse = Invoke-RestMethod `
+          -Uri "${orgUrl}/${PROJECT_NAME}/_apis/git/repositories/${REPO_NAME}/pullrequests?searchCriteria.status=completed&api-version=${GIT_API_VERSION}" `
+          -Headers $authHeader
+      
+      $filteredPRs = $prResponse.value | Where-Object { $commitList -contains $_.lastMergeCommit.commitId }
+      $prCount = $filteredPRs.Count
+      # Get and filter work items
+      $filteredWorkItems = $filteredPRs | ForEach-Object {
+          try {
+              $workItems = Invoke-RestMethod `
+                  -Uri "${orgUrl}/${PROJECT_NAME}/_apis/git/repositories/${REPO_NAME}/pullRequests/$($_.pullRequestId)/workitems?api-version=${GIT_API_VERSION}" `
+                  -Headers $authHeader
+              
+              if ($workItems.value) {
+                  $ids = $workItems.value.id -join ","
+                  $allWorkItems = Invoke-RestMethod `
+                      -Uri "${orgUrl}/_apis/wit/workitems?ids=${ids}&api-version=${WIT_API_VERSION}" `
+                      -Headers $authHeader | Select-Object -ExpandProperty value
+                  
+                  # Filter to only include PBIs, Bugs, and Features
+                  $allWorkItems | Where-Object {
+                      $_.fields.'System.WorkItemType' -in @('Product Backlog Item', 'Bug', 'Feature', 'Task')
+                  }
+              }
+          }
+          catch {
+              Write-Host "⚠️ Error processing PR $($_.pullRequestId): $($_.Exception.Message)"
+          }
+      } | Sort-Object -Property @{Expression={$_.fields.'System.WorkItemType'}}, @{Expression={$_.id}}
+      $wiCount = $filteredWorkItems.Count
+
+      # Generate PRs output
+      $prOutput = $filteredPRs | Sort-Object -Property pullRequestId | ForEach-Object {
+          $createdBy = $_.createdBy.displayName
+          $prDate = [datetime]$_.creationDate | Get-Date -Format "yyyy-MM-dd"
+          "• PR#$($_.pullRequestId): $($_.title)`n" +
+          "  👤 By: $createdBy | 📅 $prDate | 🔗 ${orgUrl}/${PROJECT_NAME}/_git/${REPO_NAME}/pullrequest/$($_.pullRequestId)`n"
+      }
+
+      # Generate Work Items output
+      $wiOutput = $filteredWorkItems | ForEach-Object { 
+          "• [$($_.fields.'System.WorkItemType') $($_.id)] $($_.fields.'System.Title')`n" +
+          "  🔗 ${orgUrl}/${PROJECT_NAME}/_workitems/edit/$($_.id)`n"
+      }
+
+      # Final output
+      @"
+      📝 Release Notes for ${REPO_NAME}
+      =================================
+      📅 Release Range: ${previousTag}..${latestTag}
+      🔄 $commitCount commits included
+      🔀 $prCount pull requests merged
+      📌 $wiCount PBIs/Bugs/Features completed
+
+      $(if ($filteredWorkItems) {
+          "🎯 Work Items Included:`n$($wiOutput -join "`n")`n"
+      })
+
+      $(if ($filteredPRs) {
+          "🚀 Merged Pull Requests:`n$($prOutput -join "`n")"
+      })
+      "@ | Write-Host

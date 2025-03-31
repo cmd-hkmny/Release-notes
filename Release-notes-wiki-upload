@@ -1,0 +1,192 @@
+trigger: none
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  - group: MANUAL_PAT
+  - name: WIKI_ID
+    value: 'a1b2c3d4-e5f6-g7h8-i9j0-k1l2m3n4o5p6' # Your wiki identifier
+  - name: WIKI_FOLDER
+    value: 'Release-Notes'
+  - name: RELEASE_NOTES_FILE
+    value: '$(WIKI_FOLDER)/$(Build.Repository.Name)-$(Build.BuildNumber).md'
+  - name: WIKI_BRANCH
+    value: 'FR-release-notes' # Target branch for wiki updates
+
+steps:
+- checkout: self
+
+- task: PowerShell@2
+  displayName: "Generate and Publish Release Notes via API"
+  inputs:
+    targetType: 'inline'
+    script: |
+      # Define Variables
+      $ORG_NAME = "chand1502877"
+      $PROJECT_NAME = "DevOps_pro1"
+      $REPO_NAME = "App-03"
+      $orgUrl = "https://dev.azure.com/$ORG_NAME"
+      $WIKI_ID = "$(WIKI_ID)"
+      $WIKI_FOLDER = "$(WIKI_FOLDER)"
+      $WIKI_BRANCH = "$(WIKI_BRANCH)"
+
+      # API Versions
+      $GIT_API_VERSION = "7.1-preview.1"
+      $WIT_API_VERSION = "7.0"
+      $WIKI_API_VERSION = "7.0"
+
+      # Authentication
+      $PERSONAL_ACCESS_TOKEN = "$(MANUAL_PAT)"
+      $base64AuthInfo = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$PERSONAL_ACCESS_TOKEN"))
+      $authHeader = @{
+          Authorization = "Basic $base64AuthInfo"
+          "Content-Type" = "application/json"
+      }
+
+      # Clone the source repository (only needed for commit/tag information)
+      $sourceDir = "$(Build.SourcesDirectory)/source_repo"
+      if (Test-Path $sourceDir) { Remove-Item $sourceDir -Recurse -Force }
+      Write-Host "Cloning source repository..."
+      git clone "https://$PERSONAL_ACCESS_TOKEN@dev.azure.com/$ORG_NAME/$PROJECT_NAME/_git/$REPO_NAME" $sourceDir
+      
+      # Move to source directory
+      Set-Location $sourceDir
+
+      # Fetch tags
+      Write-Host "Processing tags..."
+      $tags = git tag --sort=-creatordate
+      $latestTag = $tags | Select-Object -First 1
+      $previousTag = $tags | Select-Object -Skip 1 -First 1
+
+      if (-not $previousTag) { 
+          Write-Host "Only one tag found, using first commit as base"
+          $previousTag = git rev-list --max-parents=0 HEAD 
+      }
+
+      Write-Host "Getting commits between $previousTag and $latestTag"
+      $commitList = @(git log --pretty=format:"%H" "$previousTag..$latestTag")
+      $commitCount = $commitList.Count
+
+      # Get merged PRs
+      Write-Host "Fetching merged pull requests..."
+      $prResponse = Invoke-RestMethod `
+          -Uri "$orgUrl/$PROJECT_NAME/_apis/git/repositories/$REPO_NAME/pullrequests?searchCriteria.status=completed&api-version=$GIT_API_VERSION" `
+          -Headers $authHeader
+      
+      $filteredPRs = @($prResponse.value | Where-Object { $commitList -contains $_.lastMergeCommit.commitId })
+      $prCount = $filteredPRs.Count
+
+      # Get linked work items
+      Write-Host "Fetching linked work items..."
+      $filteredWorkItems = @($filteredPRs | ForEach-Object {
+          try {
+              $workItems = Invoke-RestMethod `
+                  -Uri "$orgUrl/$PROJECT_NAME/_apis/git/repositories/$REPO_NAME/pullRequests/$($_.pullRequestId)/workitems?api-version=$GIT_API_VERSION" `
+                  -Headers $authHeader
+              
+              if ($workItems.value) {
+                  $ids = $workItems.value.id -join ","
+                  $items = Invoke-RestMethod `
+                      -Uri "$orgUrl/_apis/wit/workitems?ids=$ids&api-version=$WIT_API_VERSION" `
+                      -Headers $authHeader
+                  $items.value | Where-Object { $_.fields.'System.WorkItemType' -in @('Product Backlog Item', 'Bug', 'Feature') }
+              }
+          }
+          catch {
+              Write-Host "Error processing PR $($_.pullRequestId): $($_.Exception.Message)"
+          }
+      })
+
+      # Generate Markdown content
+      Write-Host "Generating release notes..."
+      $mdContent = "# Release Notes for $REPO_NAME`n`n"
+      $mdContent += "**Release Range**: $previousTag to $latestTag`n"
+      $mdContent += "**Date**: $(Get-Date -Format 'yyyy-MM-dd')`n"
+      $mdContent += "**Commits Included**: $commitCount`n"
+      $mdContent += "**Pull Requests Merged**: $prCount`n"
+      $mdContent += "**Work Items Completed**: $($filteredWorkItems.Count)`n`n"
+
+      if ($filteredWorkItems.Count -gt 0) {
+          $mdContent += "## Work Items`n"
+          $mdContent += ($filteredWorkItems | ForEach-Object {
+              "* **$($_.fields.'System.WorkItemType') #$($_.id)**: [$($_.fields.'System.Title')]($orgUrl/$PROJECT_NAME/_workitems/edit/$($_.id))"
+          }) -join "`n"
+          $mdContent += "`n`n"
+      }
+
+      if ($prCount -gt 0) {
+          $mdContent += "## Pull Requests`n"
+          $mdContent += ($filteredPRs | Sort-Object -Property pullRequestId | ForEach-Object {
+              "* **PR #$($_.pullRequestId)**: [$($_.title)]($orgUrl/$PROJECT_NAME/_git/$REPO_NAME/pullrequest/$($_.pullRequestId)) (Created by $($_.createdBy.displayName) on $([datetime]$_.creationDate.ToString('yyyy-MM-dd')))"
+          }) -join "`n"
+          $mdContent += "`n`n"
+      }
+
+      $mdContent += "[[_Back to Releases|Home]]`n"
+
+      # Wiki API operations
+      $wikiPagePath = "$WIKI_FOLDER/$REPO_NAME-$latestTag"
+      
+      # First check if page exists in the target branch
+      try {
+          $existingPage = Invoke-RestMethod `
+              -Uri "$orgUrl/$PROJECT_NAME/_apis/wiki/wikis/$WIKI_ID/pages?path=$wikiPagePath&includeContent=true&version=$WIKI_BRANCH&api-version=$WIKI_API_VERSION" `
+              -Headers $authHeader `
+              -Method Get
+          
+          $pageId = $existingPage.id
+          $etag = $existingPage.etag
+          $operation = "Updating"
+      }
+      catch {
+          if ($_.Exception.Response.StatusCode -eq 'NotFound') {
+              $pageId = $null
+              $operation = "Creating"
+          }
+          else {
+              Write-Host "❌ Error checking wiki page: $($_.Exception.Message)"
+              exit 1
+          }
+      }
+
+      # Create or update the page in the specified branch
+      $body = @{
+          content = $mdContent
+      } | ConvertTo-Json -Depth 10
+
+      try {
+          if ($operation -eq "Updating") {
+              # Update existing page with branch specification
+              $updateHeaders = $authHeader.Clone()
+              $updateHeaders.Add("If-Match", $etag)
+              
+              $result = Invoke-RestMethod `
+                  -Uri "$orgUrl/$PROJECT_NAME/_apis/wiki/wikis/$WIKI_ID/pages/$pageId?path=$wikiPagePath&version=$WIKI_BRANCH&api-version=$WIKI_API_VERSION" `
+                  -Headers $updateHeaders `
+                  -Method Put `
+                  -Body $body
+          }
+          else {
+              # Create new page in specified branch
+              $result = Invoke-RestMethod `
+                  -Uri "$orgUrl/$PROJECT_NAME/_apis/wiki/wikis/$WIKI_ID/pages?path=$wikiPagePath&version=$WIKI_BRANCH&api-version=$WIKI_API_VERSION" `
+                  -Headers $authHeader `
+                  -Method Put `
+                  -Body $body
+          }
+          
+          Write-Host "✅ Successfully $($operation.ToLower()) wiki page at $wikiPagePath in branch $WIKI_BRANCH"
+          exit 0
+      }
+      catch {
+          Write-Host "❌ Error $($operation.ToLower()) wiki page: $($_.Exception.Message)"
+          if ($_.Exception.Response) {
+              $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
+              $reader.BaseStream.Position = 0
+              $reader.DiscardBufferedData()
+              $errorContent = $reader.ReadToEnd()
+              Write-Host "Error Details: $errorContent"
+          }
+          exit 1
+      }

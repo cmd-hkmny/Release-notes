@@ -191,6 +191,27 @@ steps:
       $encodedPath = [System.Uri]::EscapeDataString($wikiPagePath)
       $WIKI_API_URL = "https://dev.azure.com/$ORG_NAME/$PROJECT_NAME/_apis/wiki/wikis/$WIKI_ID/pages?path=$encodedPath&api-version=7.1-preview.1&versionDescriptor.versionType=branch&versionDescriptor.version=$WIKI_BRANCH"
 
+      # Ensure the Parent Folder Exists (Create a Placeholder Page)
+      $parentPageUrl = "https://dev.azure.com/$ORG_NAME/$PROJECT_NAME/_apis/wiki/wikis/$WIKI_ID/pages?path=$PARENT_PAGE&api-version=7.1-preview.1&versionDescriptor.versionType=branch&versionDescriptor.version=$WIKI_BRANCH"
+      
+      Write-Host "📁 Checking if parent Wiki folder ($REPO_FOLDER) exists..."
+      try {
+          Invoke-RestMethod -Uri $parentPageUrl -Method Get -Headers $authHeader
+          Write-Host "✅ Parent folder exists."
+      } catch {
+          Write-Host "⚠️ Parent folder does not exist. Creating it..."
+          $parentBody = @{
+              content = "# $REPO_NAME Release Notes `n`n _This is an auto-generated folder to store release notes for $REPO_NAME._"
+          } | ConvertTo-Json -Depth 2
+      
+          try {
+              Invoke-RestMethod -Uri $parentPageUrl -Method Put -Headers $authHeader -Body $parentBody
+              Write-Host "✅ Successfully created parent folder: $REPO_FOLDER"
+          } catch {
+              Write-Host "❌ Failed to create parent folder: $_"
+          }
+      }
+
       # Read Existing Content (if page exists)
       Write-Host "📥 Fetching existing Wiki page content..."
       try {

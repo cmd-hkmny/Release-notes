@@ -264,3 +264,114 @@ steps:
         } catch {
           Write-Host "❌ Failed to update Wiki: $_"
         }
+# ... (previous code remains the same until the work items section)
+
+if ($filteredWorkItems.Count -gt 0) {
+    Write-Host "📂 Building full hierarchical work item tree..."
+
+    # Get all work items and their relationships
+    $allWorkItems = @{}
+    $relations = @{}
+    
+    # First pass - collect all work items
+    foreach ($item in $filteredWorkItems) {
+        $allWorkItems[$item.id] = $item
+    }
+
+    # Second pass - build relationship tree
+    foreach ($item in $filteredWorkItems) {
+        $itemId = $item.id
+        
+        # Get work item relations (parent/child)
+        try {
+            $wiWithRelations = Invoke-RestMethod `
+                -Uri "$orgUrl/_apis/wit/workitems/$itemId`?`$expand=relations&api-version=$WIT_API_VERSION" `
+                -Headers $authHeader
+            
+            foreach ($relation in $wiWithRelations.relations) {
+                if ($relation.rel -eq "System.LinkTypes.Hierarchy-Reverse" -or 
+                    $relation.rel -eq "System.LinkTypes.Hierarchy-Forward") {
+                    
+                    $relatedId = [int]($relation.url -split '/')[-1]
+                    
+                    if (-not $relations.ContainsKey($relatedId)) {
+                        $relations[$relatedId] = @()
+                    }
+                    $relations[$relatedId] += $itemId
+                }
+            }
+        } catch {
+            Write-Host "⚠️ Failed to fetch relations for item $itemId: $_"
+        }
+    }
+
+    # Function to find root items (items that aren't children of any other item)
+    $rootItems = @()
+    foreach ($id in $allWorkItems.Keys) {
+        $isChild = $false
+        foreach ($parentId in $relations.Keys) {
+            if ($relations[$parentId] -contains $id) {
+                $isChild = $true
+                break
+            }
+        }
+        if (-not $isChild) {
+            $rootItems += $allWorkItems[$id]
+        }
+    }
+
+    # Function to recursively build the tree
+    function Build-WorkItemTree {
+        param (
+            [Parameter(Mandatory=$true)][int]$itemId,
+            [Parameter(Mandatory=$true)][hashtable]$allItems,
+            [Parameter(Mandatory=$true)][hashtable]$relations,
+            [int]$level = 0
+        )
+
+        $item = $allItems[$itemId]
+        $indent = '    ' * $level
+        $emojiMap = @{
+            'Epic'    = '📦'
+            'Feature' = '🌟'
+            'Product Backlog Item' = '📌'
+            'Bug'     = '🐞'
+            'Task'    = '🔧'
+        }
+        $type = $item.fields.'System.WorkItemType'
+        $icon = $emojiMap[$type] ?? '🔹'
+
+        $treeItem = "$indent- $icon **$type #$($item.id)**: [$($item.fields.'System.Title')]($orgUrl/$PROJECT_NAME/_workitems/edit/$($item.id))`n"
+
+        if ($relations.ContainsKey($itemId)) {
+            foreach ($childId in $relations[$itemId]) {
+                if ($allItems.ContainsKey($childId)) {
+                    $treeItem += Build-WorkItemTree -itemId $childId -allItems $allItems -relations $relations -level ($level + 1)
+                }
+            }
+        }
+
+        return $treeItem
+    }
+
+    $mdContent += "`n## 📌 **Work Items (Hierarchical Structure)**`n"
+    
+    if ($rootItems.Count -gt 0) {
+        foreach ($rootItem in $rootItems | Sort-Object { $_.fields.'System.WorkItemType' }) {
+            $mdContent += Build-WorkItemTree -itemId $rootItem.id -allItems $allWorkItems -relations $relations
+        }
+    } else {
+        # Fallback if we couldn't determine hierarchy
+        $mdContent += "_Showing flat list (hierarchy could not be determined)_`n"
+        foreach ($item in $allWorkItems.Values | Sort-Object { $_.fields.'System.WorkItemType' }) {
+            $type = $item.fields.'System.WorkItemType'
+            $icon = $emojiMap[$type] ?? '🔹'
+            $mdContent += "- $icon **$type #$($item.id)**: [$($item.fields.'System.Title')]($orgUrl/$PROJECT_NAME/_workitems/edit/$($item.id))`n"
+        }
+    }
+} else {
+    $mdContent += "`n## 📌 **Work Items**`n"
+    $mdContent += "_No work items completed in this release._`n"
+}
+
+# ... (rest of your code remains the same)

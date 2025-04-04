@@ -1,0 +1,87 @@
+# Append Work Items Section - Tree Format
+if ($filteredWorkItems.Count -gt 0) {
+    Write-Host "`n📂 Building hierarchical work item tree..."
+
+    # Create a dictionary of all work items by ID
+    $allWorkItems = @{}
+    foreach ($item in $filteredWorkItems) {
+        $allWorkItems[$item.id] = $item
+    }
+
+    # Get all parent relationships recursively
+    $relatedIds = $filteredWorkItems | ForEach-Object {
+        $idList = @()
+        $current = $_
+        while ($current.fields.'System.Parent') {
+            $parentId = $current.fields.'System.Parent'
+            $idList += $parentId
+            if (-not $allWorkItems.ContainsKey($parentId)) {
+                try {
+                    $parentItem = Invoke-RestMethod `
+                        -Uri "$orgUrl/_apis/wit/workitems/$parentId?api-version=$WIT_API_VERSION" `
+                        -Headers $authHeader
+                    $allWorkItems[$parentId] = $parentItem
+                    $current = $parentItem
+                } catch {
+                    Write-Host "⚠️ Failed to fetch parent item $parentId: $_"
+                    break
+                }
+            } else {
+                $current = $allWorkItems[$parentId]
+            }
+        }
+        $idList
+    }
+
+    # Build reverse lookup: parent -> children
+    $tree = @{}
+    foreach ($item in $allWorkItems.Values) {
+        $id = $item.id
+        $parentId = $item.fields.'System.Parent'
+        if ($parentId) {
+            if (-not $tree.ContainsKey($parentId)) {
+                $tree[$parentId] = @()
+            }
+            $tree[$parentId] += $item
+        }
+    }
+
+    # Find root items (those without parent)
+    $rootItems = $allWorkItems.Values | Where-Object { -not $_.fields.'System.Parent' }
+
+    function Format-WorkItemTree {
+        param (
+            [Parameter(Mandatory = $true)][object]$workItem,
+            [Parameter(Mandatory = $true)][ref]$content,
+            [int]$level = 0
+        )
+
+        $indent = '  ' * $level
+        $emojiMap = @{
+            'Epic'    = '📦'
+            'Feature' = '🌟'
+            'Product Backlog Item' = '📌'
+            'Bug'     = '🐞'
+            'Task'    = '🔧'
+        }
+        $type = $workItem.fields.'System.WorkItemType'
+        $icon = $emojiMap[$type] ?? '🔹'
+
+        $content.Value += "$indent- $icon **$type #$($workItem.id)**: [$($workItem.fields.'System.Title')]($orgUrl/$PROJECT_NAME/_workitems/edit/$($workItem.id))`n"
+
+        if ($tree.ContainsKey($workItem.id)) {
+            foreach ($child in $tree[$workItem.id]) {
+                Format-WorkItemTree -workItem $child -content $content -level ($level + 1)
+            }
+        }
+    }
+
+    $mdContent += "`n## 📌 **Work Items (Hierarchical)**`n"
+    foreach ($root in $rootItems | Sort-Object -Property id) {
+        Format-WorkItemTree -workItem $root -content ([ref]$mdContent)
+    }
+
+} else {
+    $mdContent += "`n## 📌 **Work Items**`n"
+    $mdContent += "_No work items completed in this release._`n"
+}

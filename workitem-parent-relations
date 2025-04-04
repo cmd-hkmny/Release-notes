@@ -1,15 +1,12 @@
-# Append Work Items Section - Tree Format
 if ($filteredWorkItems.Count -gt 0) {
-    Write-Host "`n📂 Building hierarchical work item tree..."
+    Write-Host "`n📂 Building full hierarchical work item tree..."
 
-    # Create a dictionary of all work items by ID
     $allWorkItems = @{}
     foreach ($item in $filteredWorkItems) {
         $allWorkItems[$item.id] = $item
     }
 
-    # Recursively fetch all parents
-    $expandedIds = @{}
+    # Recursively fetch all parent items
     foreach ($item in $filteredWorkItems) {
         $current = $item
         while ($current.fields.'System.Parent') {
@@ -31,10 +28,9 @@ if ($filteredWorkItems.Count -gt 0) {
         }
     }
 
-    # Build reverse lookup: parent → children
+    # Build reverse parent-to-child tree
     $tree = @{}
     foreach ($item in $allWorkItems.Values) {
-        $id = $item.id
         $parentId = $item.fields.'System.Parent'
         if ($parentId) {
             if (-not $tree.ContainsKey($parentId)) {
@@ -44,8 +40,9 @@ if ($filteredWorkItems.Count -gt 0) {
         }
     }
 
-    # Identify root items (no parent in the collected set)
-    $rootItems = $allWorkItems.Values | Where-Object { -not $_.fields.'System.Parent' }
+    # Dynamically identify true root items (those not children of any other item)
+    $allChildIds = $tree.Values | ForEach-Object { $_.id } | Select-Object -Unique
+    $rootItems = $allWorkItems.Values | Where-Object { -not $_.fields.'System.Parent' -or (-not $allWorkItems.ContainsKey($_.fields.'System.Parent')) }
 
     function Format-WorkItemTree {
         param (
@@ -74,13 +71,11 @@ if ($filteredWorkItems.Count -gt 0) {
         }
     }
 
-    # Add section header
     $mdContent += "`n## 📌 **Work Items (Hierarchical)**`n"
 
     foreach ($root in $rootItems | Sort-Object -Property id) {
         Format-WorkItemTree -workItem $root -content ([ref]$mdContent)
     }
-
 } else {
     $mdContent += "`n## 📌 **Work Items**`n"
     $mdContent += "_No work items completed in this release._`n"

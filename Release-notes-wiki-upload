@@ -6,237 +6,256 @@ pool:
 variables:
   - group: MANUAL_PAT
   - name: WIKI_ID
-    value: 'App-03_wiki' # Your wiki identifier
+    value: 'App-03_wiki'
   - name: WIKI_FOLDER
     value: 'Release-Notes'
   - name: RELEASE_NOTES_FILE
     value: '$(WIKI_FOLDER)/$(Build.Repository.Name)-$(Build.BuildNumber).md'
   - name: WIKI_BRANCH
-    value: 'main' # Target branch for wiki updates
+    value: 'main'
   - name: ARTIFACT_NAME
     value: 'Release-Notes'
 
 steps:
-- checkout: self
+  - checkout: self
 
-- task: PowerShell@2
-  displayName: "Generate Release Notes"
-  inputs:
-    targetType: 'inline'
-    script: |
-      # Define Variables
-      $ORG_NAME = "chand1502877"
-      $PROJECT_NAME = "DevOps_pro1"
-      $REPO_NAME = "App-03"
-      $orgUrl = "https://dev.azure.com/$ORG_NAME"
-      $WIKI_FOLDER = "$(WIKI_FOLDER)"
-      $ARTIFACT_DIR = "$(Build.ArtifactStagingDirectory)/$(ARTIFACT_NAME)"
+  - task: PowerShell@2
+    displayName: "Generate Release Notes"
+    inputs:
+      targetType: 'inline'
+      script: |
+        # Define Variables
+        $ORG_NAME = "chand1502877"
+        $PROJECT_NAME = "DevOps_pro1"
+        $REPO_NAME = "App-03"
+        $orgUrl = "https://dev.azure.com/$ORG_NAME"
+        $WIKI_FOLDER = "$(WIKI_FOLDER)"
+        $ARTIFACT_DIR = "$(Build.ArtifactStagingDirectory)/$(ARTIFACT_NAME)"
 
-      # Create artifact directory
-      New-Item -ItemType Directory -Path $ARTIFACT_DIR -Force | Out-Null
+        # Create artifact directory
+        New-Item -ItemType Directory -Path $ARTIFACT_DIR -Force | Out-Null
 
-      # API Versions
-      $GIT_API_VERSION = "7.1-preview.1"
-      $WIT_API_VERSION = "7.0"
+        # API Versions
+        $GIT_API_VERSION = "7.1-preview.1"
+        $WIT_API_VERSION = "7.0"
 
-      # Authentication
-      $PERSONAL_ACCESS_TOKEN = "$(MANUAL_PAT)"
-      $base64AuthInfo = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$PERSONAL_ACCESS_TOKEN"))
-      $authHeader = @{
-          Authorization = "Basic $base64AuthInfo"
-          "Content-Type" = "application/json"
-      }
+        # Authentication
+        $PERSONAL_ACCESS_TOKEN = "$(MANUAL_PAT)"
+        $base64AuthInfo = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$PERSONAL_ACCESS_TOKEN"))
+        $authHeader = @{
+            Authorization = "Basic $base64AuthInfo"
+            "Content-Type" = "application/json"
+        }
 
-      # Clone the source repository
-      $sourceDir = "$(Build.SourcesDirectory)/source_repo"
-      if (Test-Path $sourceDir) { Remove-Item $sourceDir -Recurse -Force }
-      Write-Host "Cloning source repository..."
-      git clone "https://$PERSONAL_ACCESS_TOKEN@dev.azure.com/$ORG_NAME/$PROJECT_NAME/_git/$REPO_NAME" $sourceDir
-      
-      # Move to source directory
-      Set-Location $sourceDir
+        # Clone the source repository
+        $sourceDir = "$(Build.SourcesDirectory)/source_repo"
+        if (Test-Path $sourceDir) { Remove-Item $sourceDir -Recurse -Force }
+        Write-Host "Cloning source repository..."
+        git clone "https://$PERSONAL_ACCESS_TOKEN@dev.azure.com/$ORG_NAME/$PROJECT_NAME/_git/$REPO_NAME" $sourceDir
+        
+        # Move to source directory
+        Set-Location $sourceDir
 
-      # Fetch tags
-      Write-Host "Processing tags..."
-      $tags = git tag --sort=-creatordate
-      $latestTag = $tags | Select-Object -First 1
-      $previousTag = $tags | Select-Object -Skip 1 -First 1
+        # Fetch tags
+        Write-Host "Processing tags..."
+        $tags = git tag --sort=-creatordate
+        $latestTag = $tags | Select-Object -First 1
+        $previousTag = $tags | Select-Object -Skip 1 -First 1
 
-      if (-not $previousTag) { 
+        if (-not $previousTag) {
           Write-Host "Only one tag found, using first commit as base"
-          $previousTag = git rev-list --max-parents=0 HEAD 
-      }
+          $previousTag = git rev-list --max-parents=0 HEAD
+        }
 
-      Write-Host "Getting commits between $previousTag and $latestTag"
-      #$commitList = git log --pretty=format:"%H" "${previousTag{}..${latestTag}"
-      $commitList = @(git log --pretty=format:"%H" "$previousTag..$latestTag")
-      $commitCount = $commitList.Count
+        Write-Host "Getting commits between $previousTag and $latestTag"
+        $commitList = @(git log --pretty=format:"%H" "$previousTag..$latestTag")
+        $commitCount = $commitList.Count
 
-      # Get merged PRs
-      Write-Host "Fetching merged pull requests..."
-      $prResponse = Invoke-RestMethod `
-          -Uri "$orgUrl/$PROJECT_NAME/_apis/git/repositories/$REPO_NAME/pullrequests?searchCriteria.status=completed&api-version=$GIT_API_VERSION" `
-          -Headers $authHeader
-      
-      $filteredPRs = @($prResponse.value | Where-Object { $commitList -contains $_.lastMergeCommit.commitId })
-      $prCount = $filteredPRs.Count
+        # Get merged PRs
+        Write-Host "Fetching merged pull requests..."
+        $prResponse = Invoke-RestMethod `
+            -Uri "$orgUrl/$PROJECT_NAME/_apis/git/repositories/$REPO_NAME/pullrequests?searchCriteria.status=completed&api-version=$GIT_API_VERSION" `
+            -Headers $authHeader
+        
+        $filteredPRs = @($prResponse.value | Where-Object { $commitList -contains $_.lastMergeCommit.commitId })
+        $prCount = $filteredPRs.Count
 
-      # Get linked work items
-      Write-Host "Fetching linked work items..."
-      $filteredWorkItems = @($filteredPRs | ForEach-Object {
-          try {
-              $workItems = Invoke-RestMethod `
-                  -Uri "$orgUrl/$PROJECT_NAME/_apis/git/repositories/$REPO_NAME/pullRequests/$($_.pullRequestId)/workitems?api-version=$GIT_API_VERSION" `
-                  -Headers $authHeader
-              
-              if ($workItems.value) {
-                  $ids = $workItems.value.id -join ","
-                  $items = Invoke-RestMethod `
-                      -Uri "$orgUrl/_apis/wit/workitems?ids=$ids&api-version=$WIT_API_VERSION" `
-                      -Headers $authHeader
-                  $items.value | Where-Object { $_.fields.'System.WorkItemType' -in @('Product Backlog Item', 'Bug', 'Feature') }
+        # Get linked work items
+        Write-Host "Fetching linked work items..."
+        $filteredWorkItems = @($filteredPRs | ForEach-Object {
+            try {
+                $workItems = Invoke-RestMethod `
+                    -Uri "$orgUrl/$PROJECT_NAME/_apis/git/repositories/$REPO_NAME/pullRequests/$($_.pullRequestId)/workitems?api-version=$GIT_API_VERSION" `
+                    -Headers $authHeader
+
+                if ($workItems.value) {
+                    $ids = $workItems.value.id -join ","
+                    $items = Invoke-RestMethod `
+                        -Uri "$orgUrl/_apis/wit/workitems?ids=$ids&api-version=$WIT_API_VERSION" `
+                        -Headers $authHeader
+                    $items.value | Where-Object { $_.fields.'System.WorkItemType' -in @('Product Backlog Item', 'Bug', 'Feature') }
+                }
+            } catch {
+                Write-Host "Error processing PR $($_.pullRequestId): $($_.Exception.Message)"
+            }
+        })
+
+        # Generate Markdown content
+        Write-Host "Generating formatted release notes..."
+
+        $mdContent = @"
+        # 📝 **Release Notes for $REPO_NAME**
+        ---
+        📅 **Release Range:** $previousTag ➡️ $latestTag  
+        📆 **Date:** $(Get-Date -Format 'yyyy-MM-dd')  
+        ✅ **Commits Included:** $commitCount  
+        🔀 **Pull Requests Merged:** $prCount  
+        🏗 **Work Items Completed:** $($filteredWorkItems.Count)
+        ---
+        "@
+
+        # Pull Requests
+        $mdContent += "`n## 🔀 **Pull Requests**`n"
+        if ($prCount -gt 0) {
+            foreach ($pr in ($filteredPRs | Sort-Object -Property pullRequestId)) {
+                $mdContent += "- ✅ **PR #$($pr.pullRequestId):** [$($pr.title)]($orgUrl/$PROJECT_NAME/_git/$REPO_NAME/pullrequest/$($pr.pullRequestId)) `n"
+                $mdContent += "  📝 by **$($pr.createdBy.displayName)** on 🗓 $(Get-Date $pr.creationDate -Format 'dd-MMM-yyyy') `n"
+            }
+        } else {
+            $mdContent += "_No PRs merged in this release._`n"
+        }
+
+        # Work Items Tree
+        if ($filteredWorkItems.Count -gt 0) {
+            Write-Host "`n📂 Building hierarchical work item tree..."
+
+            $allWorkItems = @{}
+            foreach ($item in $filteredWorkItems) {
+              $allWorkItems[$item.id] = $item
+            }
+
+            $relatedIds = $filteredWorkItems | ForEach-Object {
+              $idList = @()
+              $current = $_
+              while ($current.fields.'System.Parent') {
+                $parentId = $current.fields.'System.Parent'
+                $idList += $parentId
+                if (-not $allWorkItems.ContainsKey($parentId)) {
+                  $parentItem = Invoke-RestMethod `
+                    -Uri "$orgUrl/_apis/wit/workitems/$parentId?api-version=$WIT_API_VERSION" `
+                    -Headers $authHeader
+                  $allWorkItems[$parentId] = $parentItem
+                  $current = $parentItem
+                } else {
+                  $current = $allWorkItems[$parentId]
+                }
               }
-          }
-          catch {
-              Write-Host "Error processing PR $($_.pullRequestId): $($_.Exception.Message)"
-          }
-      })
+              $idList
+            }
 
-      # Generate Markdown content with better formatting
-      Write-Host "Generating formatted release notes..."
+            $tree = @{}
+            foreach ($item in $allWorkItems.Values) {
+              $id = $item.id
+              $parentId = $item.fields.'System.Parent'
+              if ($parentId) {
+                if (-not $tree.ContainsKey($parentId)) {
+                  $tree[$parentId] = @()
+                }
+                $tree[$parentId] += $item
+              }
+            }
 
-      $mdContent = @"
-      # 📝 **Release Notes for $REPO_NAME**
-      ---
-      📅 "`n **Release Range:** $previousTag ➡️ $latestTag `n"
-      📆 **Date:** $(Get-Date -Format 'yyyy-MM-dd')  
-      ✅ "`n **Commits Included:** $commitCount `n "
-      🔀 **Pull Requests Merged:** $prCount 
-      🏗 **Work Items Completed:** $($filteredWorkItems.Count)
+            $rootItems = $allWorkItems.Values | Where-Object { -not $_.fields.'System.Parent' }
 
-      ---
-      "@
+            function Format-WorkItemTree {
+              param ([object]$workItem, [int]$level = 0)
+              $indent = '  ' * $level
+              $emojiMap = @{
+                'Epic' = '📦'; 'Feature' = '🌟'; 'Product Backlog Item' = '📌'; 'Bug' = '🐞'; 'Task' = '🔧'
+              }
+              $type = $workItem.fields.'System.WorkItemType'
+              $icon = $emojiMap[$type] ?? '🔹'
+              $mdContent += "$indent- $icon **$type #$($workItem.id)**: [$($workItem.fields.'System.Title')]($orgUrl/$PROJECT_NAME/_workitems/edit/$($workItem.id))`n"
 
-      # Append Pull Requests Section
-      if ($prCount -gt 0) {
-          $mdContent += "`n## 🔀 **Pull Requests**`n"
-          foreach ($pr in ($filteredPRs | Sort-Object -Property pullRequestId)) {
-              $mdContent += "- ✅ **PR #$($pr.pullRequestId):** [$($pr.title)]($orgUrl/$PROJECT_NAME/_git/$REPO_NAME/pullrequest/$($pr.pullRequestId)) `n"
-              $mdContent += "  📝 by **$($pr.createdBy.displayName)** on 🗓 $(Get-Date $pr.creationDate -Format 'dd-MMM-yyyy') `n"
-          }
-      } else {
-          $mdContent += "`n## 🔀 **Pull Requests**`n"
-          $mdContent += "_No PRs merged in this release._`n"
-      }
+              if ($tree.ContainsKey($workItem.id)) {
+                foreach ($child in $tree[$workItem.id]) {
+                  Format-WorkItemTree -workItem $child -level ($level + 1)
+                }
+              }
+            }
 
-      # Append Work Items Section
-      if ($filteredWorkItems.Count -gt 0) {
-          $mdContent += "`n## 📌 **Work Items**`n"
-          foreach ($workItem in $filteredWorkItems) {
-              $mdContent += "- 🏗 **$($workItem.fields.'System.WorkItemType') #$($workItem.id)**: [$($workItem.fields.'System.Title')]($orgUrl/$PROJECT_NAME/_workitems/edit/$($workItem.id)) `n"
-          }
-      } else {
-          $mdContent += "`n## 📌 **Work Items**`n"
-          $mdContent += "_No work items completed in this release._`n"
-      }
+            $mdContent += "`n## 📌 **Work Items (Hierarchical)**`n"
+            foreach ($root in $rootItems | Sort-Object -Property id) {
+              Format-WorkItemTree -workItem $root
+            }
+        } else {
+            $mdContent += "`n## 📌 **Work Items**`n"
+            $mdContent += "_No work items completed in this release._`n"
+        }
 
-      # Append Back to Home Link
-      $mdContent += "`n---`n"
-      $mdContent += "[[_🏠 Back to Releases|Home]]`n"
-      # Save to artifact directory
-      $artifactFilePath = "$ARTIFACT_DIR/$REPO_NAME-$latestTag.md"
-      Write-Host "Saving release notes to artifact: $artifactFilePath"
-      $mdContent | Out-File -FilePath $artifactFilePath -Encoding utf8
+        # Footer
+        $mdContent += "`n---`n"
+        $mdContent += "[[_🏠 Back to Releases|Home]]`n"
 
-      # Set variables for next steps
-      Write-Host "##vso[task.setvariable variable=RELEASE_NOTES_CONTENT]$mdContent"
-      Write-Host "##vso[task.setvariable variable=RELEASE_NOTES_FILE]$artifactFilePath"
-      Write-Host "##vso[task.setvariable variable=RELEASE_NOTES_PATH]$WIKI_FOLDER/$REPO_NAME-$latestTag"
+        # Save file
+        $artifactFilePath = "$ARTIFACT_DIR/$REPO_NAME-$latestTag.md"
+        Write-Host "Saving release notes to artifact: $artifactFilePath"
+        $mdContent | Out-File -FilePath $artifactFilePath -Encoding utf8
 
-- task: PublishBuildArtifacts@1
-  displayName: 'Publish Release Notes Artifact'
-  inputs:
-    PathtoPublish: '$(Build.ArtifactStagingDirectory)/$(ARTIFACT_NAME)'
-    ArtifactName: '$(ARTIFACT_NAME)'
-    publishLocation: 'Container'
+        # Set variables
+        Write-Host "##vso[task.setvariable variable=RELEASE_NOTES_CONTENT]$mdContent"
+        Write-Host "##vso[task.setvariable variable=RELEASE_NOTES_FILE]$artifactFilePath"
+        Write-Host "##vso[task.setvariable variable=RELEASE_NOTES_PATH]$WIKI_FOLDER/$REPO_NAME-$latestTag"
 
-- task: PowerShell@2
-  displayName: "Ensure Parent Folder Exists & Upload Release Notes"
-  inputs:
-    targetType: 'inline'
-    script: |
-      # Define Variables
-      $ORG_NAME = "chand1502877"
-      $PROJECT_NAME = "DevOps_pro1"
-      $WIKI_ID = "$(WIKI_ID)"
-      $WIKI_BRANCH = "$(WIKI_BRANCH)"
-      $WIKI_FOLDER = "$(WIKI_FOLDER)"
-      $RELEASE_NOTES_FILE = "$(RELEASE_NOTES_FILE)"
-      $PARENT_PAGE = "/$WIKI_FOLDER"
-      #$WIKI_API_URL = "https://dev.azure.com/$ORG_NAME/$PROJECT_NAME/_apis/wiki/wikis/$WIKI_ID/pages"
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish Release Notes Artifact'
+    inputs:
+      PathtoPublish: '$(Build.ArtifactStagingDirectory)/$(ARTIFACT_NAME)'
+      ArtifactName: '$(ARTIFACT_NAME)'
+      publishLocation: 'Container'
 
-      # Authentication
-      $PERSONAL_ACCESS_TOKEN = "$(MANUAL_PAT)"
-      $base64AuthInfo = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$PERSONAL_ACCESS_TOKEN"))
-      $authHeader = @{
+  - task: PowerShell@2
+    displayName: "Ensure Parent Folder Exists & Upload Release Notes"
+    inputs:
+      targetType: 'inline'
+      script: |
+        $ORG_NAME = "chand1502877"
+        $PROJECT_NAME = "DevOps_pro1"
+        $WIKI_ID = "$(WIKI_ID)"
+        $WIKI_BRANCH = "$(WIKI_BRANCH)"
+        $WIKI_FOLDER = "$(WIKI_FOLDER)"
+        $RELEASE_NOTES_FILE = "$(RELEASE_NOTES_FILE)"
+        $wikiPagePath = "/$WIKI_FOLDER/$(Build.Repository.Name)-$(Build.BuildNumber).md"
+        $encodedPath = [System.Uri]::EscapeDataString($wikiPagePath)
+
+        $WIKI_API_URL = "https://dev.azure.com/$ORG_NAME/$PROJECT_NAME/_apis/wiki/wikis/$WIKI_ID/pages?path=$encodedPath&api-version=7.1-preview.1&versionDescriptor.versionType=branch&versionDescriptor.version=$WIKI_BRANCH"
+
+        $PERSONAL_ACCESS_TOKEN = "$(MANUAL_PAT)"
+        $base64AuthInfo = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$PERSONAL_ACCESS_TOKEN"))
+        $authHeader = @{
           Authorization = "Basic $base64AuthInfo"
           "Content-Type" = "application/json"
-      }
+        }
 
-      # Define Wiki API URL Properly
-      $wikiPagePath = "/$WIKI_FOLDER/$(Build.Repository.Name)-$(Build.BuildNumber).md"
-      $WIKI_API_URL = "https://dev.azure.com/$ORG_NAME/$PROJECT_NAME/_apis/wiki/wikis/$WIKI_ID/pages?path=$wikiPagePath&api-version=7.1-preview.1&versionDescriptor.versionType=branch&versionDescriptor.version=$WIKI_BRANCH"
-
-      # Ensure Path is Encoded Correctly
-      $encodedPath = [System.Uri]::EscapeDataString($wikiPagePath)
-      $WIKI_API_URL = "https://dev.azure.com/$ORG_NAME/$PROJECT_NAME/_apis/wiki/wikis/$WIKI_ID/pages?path=$encodedPath&api-version=7.1-preview.1&versionDescriptor.versionType=branch&versionDescriptor.version=$WIKI_BRANCH"
-
-      # Ensure the Parent Folder Exists (Create a Placeholder Page)
-      $parentPageUrl = "https://dev.azure.com/$ORG_NAME/$PROJECT_NAME/_apis/wiki/wikis/$WIKI_ID/pages?path=$PARENT_PAGE&api-version=7.1-preview.1&versionDescriptor.versionType=branch&versionDescriptor.version=$WIKI_BRANCH"
-      
-      Write-Host "📁 Checking if parent Wiki folder ($REPO_FOLDER) exists..."
-      try {
-          Invoke-RestMethod -Uri $parentPageUrl -Method Get -Headers $authHeader
-          Write-Host "✅ Parent folder exists."
-      } catch {
-          Write-Host "⚠️ Parent folder does not exist. Creating it..."
-          $parentBody = @{
-              content = "# $REPO_NAME Release Notes `n`n _This is an auto-generated folder to store release notes for $REPO_NAME._"
-          } | ConvertTo-Json -Depth 2
-      
-          try {
-              Invoke-RestMethod -Uri $parentPageUrl -Method Put -Headers $authHeader -Body $parentBody
-              Write-Host "✅ Successfully created parent folder: $REPO_FOLDER"
-          } catch {
-              Write-Host "❌ Failed to create parent folder: $_"
-          }
-      }
-
-      # Read Existing Content (if page exists)
-      Write-Host "📥 Fetching existing Wiki page content..."
-      try {
+        Write-Host "📥 Fetching existing Wiki page content..."
+        try {
           $existingPage = Invoke-RestMethod -Uri $WIKI_API_URL -Method Get -Headers $authHeader
           $existingContent = $existingPage.content
           Write-Host "✅ Existing content fetched."
-      } catch {
+        } catch {
           Write-Host "⚠️ Page does not exist. Creating a new one..."
           $existingContent = ""
-      }
-      $newContent = Get-Content -Raw -Path $RELEASE_NOTES_FILE
+        }
 
-      # Append new content
-      $updatedContent = "$existingContent`n`n$($newContent -join "`n")"
+        $newContent = Get-Content -Raw -Path $RELEASE_NOTES_FILE
+        $updatedContent = "$existingContent`n`n$($newContent -join "`n")"
 
-      # Create JSON Payload
-      $jsonBody = @{
-          content = $updatedContent
-      } | ConvertTo-Json -Depth 2
+        $jsonBody = @{ content = $updatedContent } | ConvertTo-Json -Depth 2
 
-      # Upload to Wiki
-      Write-Host "🔄 Updating Wiki page with appended content..."
-      try {
+        Write-Host "🔄 Updating Wiki page with appended content..."
+        try {
           Invoke-RestMethod -Uri $WIKI_API_URL -Method Put -Headers $authHeader -Body $jsonBody
           Write-Host "✅ Successfully updated Wiki page with appended content."
-      } catch {
+        } catch {
           Write-Host "❌ Failed to update Wiki: $_"
-      }
+        }

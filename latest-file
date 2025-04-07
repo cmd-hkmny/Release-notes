@@ -1,28 +1,33 @@
-# Work Items Tree - Full Hierarchy Solution
+# Work Items Tree - Final Fixed Solution
 if ($filteredWorkItems.Count -gt 0) {
     Write-Host "📂 Building complete work item hierarchy (Epic→Feature→PBI/Bug/Task)..."
 
-    # Step 1: Collect all work items and build relationship maps
+    # Step 1: Initialize collections
     $allWorkItems = @{}
     $childToParentMap = @{}
     $parentToChildrenMap = @{}
     $missingParents = @{}
     
-    # First pass - collect all work items
+    # First pass - collect all initial work items
     foreach ($item in $filteredWorkItems) {
         if ($item -and $item.id -and $item.fields) {
             $allWorkItems[$item.id] = $item
         }
     }
 
-    # Step 2: Build complete relationship hierarchy
+    # Step 2: Build relationship maps without modifying during enumeration
+    $itemsToProcess = [System.Collections.Queue]::new()
+    foreach ($id in @($allWorkItems.Keys)) {  # Create static copy with @()
+        $itemsToProcess.Enqueue($id)
+    }
+
     $maxDepth = 5  # Prevent infinite loops
     $processedItems = @{}
     
-    function ProcessItemRelations {
-        param($itemId, $currentDepth = 0)
+    while ($itemsToProcess.Count -gt 0) {
+        $itemId = $itemsToProcess.Dequeue()
         
-        if ($currentDepth -ge $maxDepth -or $processedItems[$itemId]) { return }
+        if ($processedItems[$itemId]) { continue }
         $processedItems[$itemId] = $true
         
         try {
@@ -53,7 +58,7 @@ if ($filteredWorkItems.Count -gt 0) {
                             if ($parentItem -and $parentItem.id -and $parentItem.fields) {
                                 $allWorkItems[$parentId] = $parentItem
                                 Write-Host "✅ Found parent item $parentId (type: $($parentItem.fields.'System.WorkItemType')) for child $itemId"
-                                ProcessItemRelations $parentId ($currentDepth + 1)
+                                $itemsToProcess.Enqueue($parentId)  # Process this parent's relationships
                             }
                         } catch {
                             Write-Host "⚠️ Could not fetch parent item $parentId: $($_.Exception.Message)"
@@ -74,11 +79,6 @@ if ($filteredWorkItems.Count -gt 0) {
         } catch {
             Write-Host "⚠️ Failed to fetch relations for item ${itemId}: $($_.Exception.Message)"
         }
-    }
-
-    # Process all items to build complete hierarchy
-    foreach ($itemId in $allWorkItems.Keys) {
-        ProcessItemRelations $itemId
     }
 
     # Step 3: Define display settings
@@ -142,7 +142,7 @@ if ($filteredWorkItems.Count -gt 0) {
     $mdContent += "`n## 🌳 **Complete Work Item Hierarchy**`n"
     
     # Find root items (items without parents in our set)
-    $rootItems = $allWorkItems.Values | Where-Object { 
+    $rootItems = @($allWorkItems.Values) | Where-Object { 
         -not $childToParentMap.ContainsKey($_.id) -and 
         $_.fields.'System.WorkItemType' -in @('Epic','Feature','Product Backlog Item')
     } | Sort-Object { 
@@ -151,16 +151,20 @@ if ($filteredWorkItems.Count -gt 0) {
 
     if ($rootItems.Count -gt 0) {
         foreach ($rootItem in $rootItems) {
-            $mdContent += Build-HierarchyDisplay `
+            $hierarchy = Build-HierarchyDisplay `
                 -itemId $rootItem.id `
                 -allItems $allWorkItems `
                 -childToParentMap $childToParentMap `
                 -parentToChildrenMap $parentToChildrenMap `
                 -emojiMap $emojiMap
+            
+            if (-not [string]::IsNullOrEmpty($hierarchy)) {
+                $mdContent += $hierarchy
+            }
         }
     } else {
         $mdContent += "_No Epics/Features found at root level. Showing all items:_`n"
-        $allItemsSorted = $allWorkItems.Values | Sort-Object { 
+        $allItemsSorted = @($allWorkItems.Values) | Sort-Object { 
             $typeOrder.IndexOf($_.fields.'System.WorkItemType'), $_.id
         }
         

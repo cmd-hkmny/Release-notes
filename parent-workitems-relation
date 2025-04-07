@@ -181,3 +181,4 @@
                 }
             }
         }
+#$items.value | Where-Object { $_.fields.'System.WorkItemType' -in @('Product Backlog Item', 'Bug', 'Feature', 'task', 'issue') }

@@ -1,0 +1,97 @@
+# Input Variables
+$orgUrl = "https://dev.azure.com/YourOrg"
+$project = "YourProject"
+$tag = "$(Release.ReleaseName)"  # Or hardcode like "Release_2025.04"
+$pat = "YOUR_PAT"
+
+# Auth
+$base64AuthInfo = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$pat"))
+
+# Query WIQL
+$query = @{
+    query = @"
+SELECT [System.Id] 
+FROM WorkItems 
+WHERE [System.TeamProject] = '$project'
+AND [System.Tags] CONTAINS '$tag'
+AND [System.WorkItemType] IN ('Product Backlog Item', 'Bug')
+"@
+} | ConvertTo-Json -Depth 10
+
+$wiqlUrl = "$orgUrl/$project/_apis/wit/wiql?api-version=7.0"
+$response = Invoke-RestMethod -Uri $wiqlUrl -Method Post -Headers @{Authorization=("Basic {0}" -f $base64AuthInfo)} -Body $query -ContentType "application/json"
+$workItemIds = $response.workItems.id
+
+if (-not $workItemIds) {
+    Write-Host "No work items found with tag '$tag'"
+    return
+}
+
+# Get work item details
+$idsParam = ($workItemIds -join ",")
+$detailsUrl = "$orgUrl/_apis/wit/workitems?ids=$idsParam&$expand=relations&api-version=7.0"
+$items = Invoke-RestMethod -Uri $detailsUrl -Headers @{Authorization=("Basic {0}" -f $base64AuthInfo)}
+
+# Helper function
+function Get-Parent {
+    param ($relations)
+    foreach ($rel in $relations) {
+        if ($rel.rel -eq "System.LinkTypes.Hierarchy-Reverse") {
+            return $rel.url.Split("/")[-1]
+        }
+    }
+    return $null
+}
+
+# Organize by Epic > Feature
+$structured = @{}
+foreach ($item in $items.value) {
+    $id = $item.id
+    $title = $item.fields."System.Title"
+    $type = $item.fields."System.WorkItemType"
+    $relations = $item.relations
+
+    $featureId = Get-Parent -relations $relations
+    $featureTitle = ""
+    $epicId = ""
+    $epicTitle = ""
+
+    if ($featureId) {
+        $feature = Invoke-RestMethod -Uri "$orgUrl/_apis/wit/workitems/$featureId?api-version=7.0" -Headers @{Authorization=("Basic {0}" -f $base64AuthInfo)}
+        $featureTitle = $feature.fields."System.Title"
+
+        $epicId = Get-Parent -relations $feature.relations
+        if ($epicId) {
+            $epic = Invoke-RestMethod -Uri "$orgUrl/_apis/wit/workitems/$epicId?api-version=7.0" -Headers @{Authorization=("Basic {0}" -f $base64AuthInfo)}
+            $epicTitle = $epic.fields."System.Title"
+        }
+    }
+
+    if (-not $structured.ContainsKey($epicTitle)) {
+        $structured[$epicTitle] = @{}
+    }
+    if (-not $structured[$epicTitle].ContainsKey($featureTitle)) {
+        $structured[$epicTitle][$featureTitle] = @()
+    }
+    $structured[$epicTitle][$featureTitle] += "$type #$id - $title"
+}
+
+# Create markdown
+$md = "# 📦 Release Notes: $tag`n"
+foreach ($epic in $structured.Keys) {
+    $md += if ($epic) { "## 🎯 Epic: $epic`n" } else { "## 🧩 Uncategorized`n" }
+
+    foreach ($feature in $structured[$epic].Keys) {
+        $md += if ($feature) { "### 🚀 Feature: $feature`n" } else { "### 🛠️ No Feature`n" }
+        foreach ($item in $structured[$epic][$feature]) {
+            $md += "- $item`n"
+        }
+        $md += "`n"
+    }
+}
+
+# Output location (for pipeline artifacts)
+$mdPath = "$(System.DefaultWorkingDirectory)\ReleaseNotes_$tag.md"
+$md | Out-File -Encoding UTF8 $mdPath
+
+Write-Host "✅ Release notes saved to: $mdPath"

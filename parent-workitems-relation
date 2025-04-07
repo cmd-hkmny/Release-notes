@@ -1,97 +1,118 @@
-# Input Variables
-$orgUrl = "https://dev.azure.com/YourOrg"
-$project = "YourProject"
-$tag = "$(Release.ReleaseName)"  # Or hardcode like "Release_2025.04"
-$pat = "YOUR_PAT"
+# Get linked work items and their full hierarchy (parents like Features and Epics)
+Write-Host "🔗 Fetching linked work items and their hierarchy..."
 
-# Auth
-$base64AuthInfo = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$pat"))
+$workItemQueue = New-Object System.Collections.Queue
+$allWorkItems = @{}
+$relations = @{}
 
-# Query WIQL
-$query = @{
-    query = @"
-SELECT [System.Id] 
-FROM WorkItems 
-WHERE [System.TeamProject] = '$project'
-AND [System.Tags] CONTAINS '$tag'
-AND [System.WorkItemType] IN ('Product Backlog Item', 'Bug')
-"@
-} | ConvertTo-Json -Depth 10
-
-$wiqlUrl = "$orgUrl/$project/_apis/wit/wiql?api-version=7.0"
-$response = Invoke-RestMethod -Uri $wiqlUrl -Method Post -Headers @{Authorization=("Basic {0}" -f $base64AuthInfo)} -Body $query -ContentType "application/json"
-$workItemIds = $response.workItems.id
-
-if (-not $workItemIds) {
-    Write-Host "No work items found with tag '$tag'"
-    return
+# Fetch WI from PRs
+$filteredPRs | ForEach-Object {
+    try {
+        $prId = $_.pullRequestId
+        $linked = Invoke-RestMethod `
+            -Uri "$orgUrl/$PROJECT_NAME/_apis/git/repositories/$REPO_NAME/pullRequests/$prId/workitems?api-version=$GIT_API_VERSION" `
+            -Headers $authHeader
+        foreach ($ref in $linked.value) {
+            $workItemQueue.Enqueue($ref.id)
+        }
+    } catch {
+        Write-Host "⚠️ Could not fetch work items for PR $prId"
+    }
 }
 
-# Get work item details
-$idsParam = ($workItemIds -join ",")
-$detailsUrl = "$orgUrl/_apis/wit/workitems?ids=$idsParam&$expand=relations&api-version=7.0"
-$items = Invoke-RestMethod -Uri $detailsUrl -Headers @{Authorization=("Basic {0}" -f $base64AuthInfo)}
+function Fetch-WorkItemWithParents {
+    param (
+        [int]$id
+    )
+    if ($allWorkItems.ContainsKey($id)) {
+        return  # Already fetched
+    }
 
-# Helper function
-function Get-Parent {
-    param ($relations)
-    foreach ($rel in $relations) {
-        if ($rel.rel -eq "System.LinkTypes.Hierarchy-Reverse") {
-            return $rel.url.Split("/")[-1]
+    $wi = Invoke-RestMethod -Uri "$orgUrl/_apis/wit/workitems/$id?`$expand=relations&api-version=$WIT_API_VERSION" -Headers $authHeader
+    $allWorkItems[$id] = $wi
+
+    if ($wi.relations) {
+        foreach ($rel in $wi.relations) {
+            if ($rel.rel -eq "System.LinkTypes.Hierarchy-Reverse") {
+                $parentId = [int]($rel.url -split '/')[-1]
+                if (-not $relations.ContainsKey($parentId)) {
+                    $relations[$parentId] = @()
+                }
+                $relations[$parentId] += $id
+
+                # Recursively fetch parent
+                Fetch-WorkItemWithParents -id $parentId
+            }
         }
     }
-    return $null
 }
 
-# Organize by Epic > Feature
-$structured = @{}
-foreach ($item in $items.value) {
-    $id = $item.id
-    $title = $item.fields."System.Title"
-    $type = $item.fields."System.WorkItemType"
-    $relations = $item.relations
+# Process the queue
+while ($workItemQueue.Count -gt 0) {
+    $wid = $workItemQueue.Dequeue()
+    try {
+        Fetch-WorkItemWithParents -id $wid
+    } catch {
+        Write-Host "❌ Failed to fetch work item $wid: $_"
+    }
+}
 
-    $featureId = Get-Parent -relations $relations
-    $featureTitle = ""
-    $epicId = ""
-    $epicTitle = ""
+# Identify root work items (those not children of anyone)
+$rootItems = @()
+foreach ($itemId in $allWorkItems.Keys) {
+    $isChild = $false
+    foreach ($p in $relations.Values) {
+        if ($p -contains $itemId) {
+            $isChild = $true
+            break
+        }
+    }
+    if (-not $isChild) {
+        $rootItems += $itemId
+    }
+}
 
-    if ($featureId) {
-        $feature = Invoke-RestMethod -Uri "$orgUrl/_apis/wit/workitems/$featureId?api-version=7.0" -Headers @{Authorization=("Basic {0}" -f $base64AuthInfo)}
-        $featureTitle = $feature.fields."System.Title"
+# Emoji map
+$emojiMap = @{
+    'Epic'    = '📦'
+    'Feature' = '🌟'
+    'Product Backlog Item' = '📌'
+    'Bug'     = '🐞'
+    'Task'    = '🔧'
+}
 
-        $epicId = Get-Parent -relations $feature.relations
-        if ($epicId) {
-            $epic = Invoke-RestMethod -Uri "$orgUrl/_apis/wit/workitems/$epicId?api-version=7.0" -Headers @{Authorization=("Basic {0}" -f $base64AuthInfo)}
-            $epicTitle = $epic.fields."System.Title"
+function Build-WorkItemTree {
+    param (
+        [int]$itemId,
+        [int]$level = 0
+    )
+    if (-not $allWorkItems.ContainsKey($itemId)) { return "" }
+
+    $item = $allWorkItems[$itemId]
+    $indent = '    ' * $level
+    $type = $item.fields.'System.WorkItemType'
+    $icon = $emojiMap[$type] ?? '🔹'
+    $title = $item.fields.'System.Title'
+    $link = "$orgUrl/$PROJECT_NAME/_workitems/edit/$itemId"
+
+    $line = "$indent- $icon **$type #$itemId**: [$title]($link)`n"
+
+    if ($relations.ContainsKey($itemId)) {
+        foreach ($childId in ($relations[$itemId] | Sort-Object)) {
+            $line += Build-WorkItemTree -itemId $childId -level ($level + 1)
         }
     }
 
-    if (-not $structured.ContainsKey($epicTitle)) {
-        $structured[$epicTitle] = @{}
-    }
-    if (-not $structured[$epicTitle].ContainsKey($featureTitle)) {
-        $structured[$epicTitle][$featureTitle] = @()
-    }
-    $structured[$epicTitle][$featureTitle] += "$type #$id - $title"
+    return $line
 }
 
-# Create markdown
-$md = "# 📦 Release Notes: $tag`n"
-foreach ($epic in $structured.Keys) {
-    $md += if ($epic) { "## 🎯 Epic: $epic`n" } else { "## 🧩 Uncategorized`n" }
+# Output section
+$mdContent += "`n## 📌 **Work Items (Epic > Feature > PBI)**`n"
 
-    foreach ($feature in $structured[$epic].Keys) {
-        $md += if ($feature) { "### 🚀 Feature: $feature`n" } else { "### 🛠️ No Feature`n" }
-        foreach ($item in $structured[$epic][$feature]) {
-            $md += "- $item`n"
-        }
-        $md += "`n"
+if ($rootItems.Count -gt 0) {
+    foreach ($rootId in ($rootItems | Sort-Object)) {
+        $mdContent += Build-WorkItemTree -itemId $rootId
     }
+} else {
+    $mdContent += "_No hierarchical structure found._`n"
 }
-
-# Output location (for pipeline artifacts)
-$mdPath = "$(System.DefaultWorkingDirectory)\ReleaseNotes_$tag.md"
-$md | Out-File -Encoding UTF8 $mdPath
-
-Write-Host "✅ Release notes saved to: $mdPath"

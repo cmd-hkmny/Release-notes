@@ -1,0 +1,70 @@
+- task: PowerShell@2
+  displayName: "Ensure Parent Folder Exists & Upload Release Notes with Version"
+  inputs:
+    targetType: 'inline'
+    script: |
+      $ORG_NAME = "chand1502877"
+      $PROJECT_NAME = "DevOps_pro1"
+      $WIKI_ID = "$(WIKI_ID)"
+      $WIKI_BRANCH = "$(WIKI_BRANCH)"
+      $WIKI_FOLDER = "$(WIKI_FOLDER)"
+      $RELEASE_NOTES_FILE = "$(RELEASE_NOTES_FILE)"
+      $PERSONAL_ACCESS_TOKEN = "$(MANUAL_PAT)"
+      
+      # Step 1: Extract version from Assembly.cs
+      Write-Host "🔍 Searching for AssemblyVersion..."
+      $assemblyFile = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Recurse -Filter "Assembly.cs" | Select-Object -First 1
+      if (-not $assemblyFile) {
+        Write-Error "❌ Assembly.cs file not found!"
+        exit 1
+      }
+
+      $versionLine = Get-Content $assemblyFile.FullName | Where-Object { $_ -match 'AssemblyVersion\("([0-9\.]+)"\)' }
+      if (-not $versionLine) {
+        Write-Error "❌ AssemblyVersion not found in file!"
+        exit 1
+      }
+
+      $matches = [regex]::Match($versionLine, 'AssemblyVersion\("([0-9\.]+)"\)')
+      $assemblyVersion = $matches.Groups[1].Value
+      Write-Host "✅ Found version: $assemblyVersion"
+
+      # Step 2: Update filename and wiki path
+      $wikiPagePath = "/$WIKI_FOLDER/$(Build.Repository.Name)-$assemblyVersion.md"
+      $encodedPath = [System.Uri]::EscapeDataString($wikiPagePath)
+
+      $WIKI_API_URL = "https://dev.azure.com/$ORG_NAME/$PROJECT_NAME/_apis/wiki/wikis/$WIKI_ID/pages?path=$encodedPath&api-version=7.1-preview.1&versionDescriptor.versionType=branch&versionDescriptor.version=$WIKI_BRANCH"
+
+      # Auth header
+      $base64AuthInfo = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$PERSONAL_ACCESS_TOKEN"))
+      $authHeader = @{
+        Authorization = "Basic $base64AuthInfo"
+        "Content-Type" = "application/json"
+      }
+
+      Write-Host "📥 Fetching existing Wiki page content..."
+      try {
+        $existingPage = Invoke-RestMethod -Uri $WIKI_API_URL -Method Get -Headers $authHeader
+        $existingContent = $existingPage.content
+        Write-Host "✅ Existing content fetched."
+      } catch {
+        Write-Host "⚠️ Page does not exist. Creating a new one..."
+        $existingContent = ""
+      }
+
+      # Step 3: Read release notes content
+      $newContent = Get-Content -Raw -Path $RELEASE_NOTES_FILE
+      $updatedContent = "$existingContent`n`n$($newContent -join "`n")"
+
+      $jsonBody = @{ content = $updatedContent } | ConvertTo-Json -Depth 2
+
+      Write-Host "🔄 Updating Wiki page with appended content..."
+      try {
+        Invoke-RestMethod -Uri $WIKI_API_URL -Method Put -Headers $authHeader -Body $jsonBody
+        Write-Host "✅ Successfully updated Wiki page: $wikiPagePath"
+      } catch {
+        Write-Host "❌ Failed to update Wiki: $_"
+      }
+
+      # Optionally: Set as pipeline variable if needed
+      Write-Host "##vso[task.setvariable variable=AssemblyVersion]$assemblyVersion"

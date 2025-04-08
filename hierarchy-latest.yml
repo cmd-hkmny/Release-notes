@@ -1,194 +1,92 @@
-# Work Items Tree - Full Hierarchy with All Children
+# Work Items Tree (Simplified)
 if ($filteredWorkItems.Count -gt 0) {
-    Write-Host "📂 Building complete work item hierarchy (Epic→Feature→PBI/Bug/Task)..."
+    Write-Host "📂 Building simplified hierarchical work item tree..."
 
-    # Step 1: Initialize collections
+    # Collect all work items
     $allWorkItems = @{}
-    $childToParentMap = @{}
-    $parentToChildrenMap = @{}
-    $missingParents = @{}
-    
-    # First pass - collect all initial work items
+    $childToParent = @{}
+    $parentToChildren = @{}
+
     foreach ($item in $filteredWorkItems) {
         if ($item -and $item.id -and $item.fields) {
             $allWorkItems[$item.id] = $item
         }
     }
 
-    # Step 2: Build complete relationship hierarchy
-    $queue = [System.Collections.Queue]::new(@($allWorkItems.Keys))
-    $processedItems = @{}
-    $maxDepth = 10  # Increased depth for complex hierarchies
-
-    while ($queue.Count -gt 0) {
-        $itemId = $queue.Dequeue()
-        
-        if ($processedItems[$itemId]) { continue }
-        $processedItems[$itemId] = $true
-
+    # Build hierarchy by fetching parents
+    foreach ($item in $filteredWorkItems) {
+        $itemId = $item.id
         try {
-            $wiWithRelations = Invoke-RestMethod `
-                -Uri "$orgUrl/$PROJECT_NAME/_apis/wit/workitems/$($itemId)?`$expand=relations&api-version=$WIT_API_VERSION" `
-                -Headers $authHeader `
-                -ErrorAction Stop
-            
-            foreach ($relation in $wiWithRelations.relations) {
-                if ($relation.rel -eq "System.LinkTypes.Hierarchy-Reverse") {
-                    $parentId = [int]($relation.url -split '/')[-1]
-                    
-                    # Record relationship
-                    $childToParentMap[$itemId] = $parentId
-                    if (-not $parentToChildrenMap.ContainsKey($parentId)) {
-                        $parentToChildrenMap[$parentId] = @()
+            $wi = Invoke-RestMethod `
+                -Uri "$orgUrl/$PROJECT_NAME/_apis/wit/workitems/$itemId?`$expand=relations&api-version=$WIT_API_VERSION" `
+                -Headers $authHeader
+            $allWorkItems[$itemId] = $wi
+
+            foreach ($rel in $wi.relations) {
+                if ($rel.rel -eq "System.LinkTypes.Hierarchy-Reverse") {
+                    $parentId = [int]($rel.url.Split('/')[-1])
+                    $childToParent[$itemId] = $parentId
+
+                    if (-not $parentToChildren.ContainsKey($parentId)) {
+                        $parentToChildren[$parentId] = @()
                     }
-                    if ($parentToChildrenMap[$parentId] -notcontains $itemId) {
-                        $parentToChildrenMap[$parentId] += $itemId
-                    }
-                    
-                    # Fetch parent if not already loaded
+                    $parentToChildren[$parentId] += $itemId
+
+                    # Fetch and cache parent if missing
                     if (-not $allWorkItems.ContainsKey($parentId)) {
-                        try {
-                            $parentItem = Invoke-RestMethod `
-                                -Uri "$orgUrl/$PROJECT_NAME/_apis/wit/workitems/$($parentId)?api-version=$WIT_API_VERSION" `
-                                -Headers $authHeader `
-                                -ErrorAction Stop
-                            
-                            if ($parentItem -and $parentItem.id -and $parentItem.fields) {
-                                $allWorkItems[$parentId] = $parentItem
-                                Write-Host "✅ Found parent item $parentId (type: $($parentItem.fields.'System.WorkItemType')) for child $itemId"
-                                $queue.Enqueue($parentId)
-                            }
-                        } catch {
-                            Write-Host "⚠️ Could not fetch parent item $parentId: $($_.Exception.Message)"
-                            $missingParents[$parentId] = $true
-                            # Add placeholder
-                            $allWorkItems[$parentId] = @{
-                                id = $parentId
-                                fields = @{
-                                    'System.WorkItemType' = 'Unknown'
-                                    'System.Title' = '[Parent not accessible]'
-                                }
-                                url = "$orgUrl/$PROJECT_NAME/_workitems/edit/$parentId"
-                            }
-                        }
+                        $parentItem = Invoke-RestMethod `
+                            -Uri "$orgUrl/$PROJECT_NAME/_apis/wit/workitems/$parentId?api-version=$WIT_API_VERSION" `
+                            -Headers $authHeader
+                        $allWorkItems[$parentId] = $parentItem
                     }
                 }
             }
         } catch {
-            Write-Host "⚠️ Failed to fetch relations for item ${itemId}: $($_.Exception.Message)"
+            Write-Host "⚠️ Failed to get relations for $itemId: $_"
         }
     }
 
-    # Step 3: Define display settings
+    # Emoji map
     $emojiMap = @{
         'Epic'    = '📦'
         'Feature' = '🌟'
         'Product Backlog Item' = '📌'
         'Bug'     = '🐞'
         'Task'    = '🔧'
-        'User Story' = '📖'
         'Issue'   = '❗'
-        'Unknown' = '❓'
     }
 
-    $typeOrder = @('Epic','Feature','Product Backlog Item','User Story','Bug','Task','Issue','Unknown')
-
-    # Step 4: Build the hierarchy display
-    function Build-FullHierarchy {
+    # Recursive hierarchy formatter
+    function Format-Tree {
         param (
-            [Parameter(Mandatory)][int]$itemId,
-            [Parameter(Mandatory)][hashtable]$allItems,
-            [Parameter(Mandatory)][hashtable]$parentToChildrenMap,
-            [Parameter(Mandatory)][hashtable]$emojiMap,
-            [ref]$displayedItems,
+            [int]$id,
             [int]$level = 0
         )
 
-        $item = $allItems[$itemId]
-        if (-not $item -or -not $item.fields) { return "" }
-        if ($displayedItems.Value[$itemId]) { return "" }
-        $displayedItems.Value[$itemId] = $true
+        if (-not $allWorkItems.ContainsKey($id)) { return "" }
 
-        $indent = '    ' * $level
-        $type = $item.fields.'System.WorkItemType' ?? 'Unknown'
+        $item = $allWorkItems[$id]
+        $type = $item.fields.'System.WorkItemType'
+        $title = $item.fields.'System.Title'
         $icon = $emojiMap[$type] ?? '🔹'
+        $indent = "    " * $level
 
-        $display = "$indent- $icon **$type #$($item.id)**: [$($item.fields.'System.Title')]($($item.url ?? "$orgUrl/$PROJECT_NAME/_workitems/edit/$itemId"))`n"
+        $line = "$indent- $icon **$type #$id** - $title`n"
 
-        if ($parentToChildrenMap.ContainsKey($itemId)) {
-            # Sort children by work item type and then by ID
-            $sortedChildren = $parentToChildrenMap[$itemId] | Sort-Object {
-                $childType = $allItems[$_].fields.'System.WorkItemType' ?? 'Unknown'
-                $typeOrder.IndexOf($childType), $_
-            }
-            
-            foreach ($childId in $sortedChildren) {
-                if ($allItems.ContainsKey($childId)) {
-                    $display += Build-FullHierarchy `
-                        -itemId $childId `
-                        -allItems $allItems `
-                        -parentToChildrenMap $parentToChildrenMap `
-                        -emojiMap $emojiMap `
-                        -displayedItems $displayedItems `
-                        -level ($level + 1)
-                }
+        if ($parentToChildren.ContainsKey($id)) {
+            foreach ($childId in ($parentToChildren[$id] | Sort-Object)) {
+                $line += Format-Tree -id $childId -level ($level + 1)
             }
         }
 
-        return $display
+        return $line
     }
 
-    # Step 5: Generate the output
-    $mdContent += "`n## 🌳 **Complete Work Item Hierarchy**`n"
-    
-    # Find root items (items without parents in our set)
-    $rootItems = @($allWorkItems.Values) | Where-Object { 
-        -not $childToParentMap.ContainsKey($_.id) -and 
-        $_.fields.'System.WorkItemType' -in @('Epic','Feature','Product Backlog Item','User Story')
-    } | Sort-Object { 
-        $typeOrder.IndexOf($_.fields.'System.WorkItemType'), $_.id
-    }
+    $mdContent += "`n## 📌 **Work Items (Hierarchical Structure)**`n"
 
-    $displayedItems = @{}  # Track displayed items to prevent duplicates
-
-    if ($rootItems.Count -gt 0) {
-        foreach ($rootItem in $rootItems) {
-            $hierarchy = Build-FullHierarchy `
-                -itemId $rootItem.id `
-                -allItems $allWorkItems `
-                -parentToChildrenMap $parentToChildrenMap `
-                -emojiMap $emojiMap `
-                -displayedItems ([ref]$displayedItems)
-            
-            if (-not [string]::IsNullOrEmpty($hierarchy)) {
-                $mdContent += $hierarchy
-            }
-        }
-    } else {
-        $mdContent += "_No root items found. Showing all work items:_`n"
-    }
-
-    # Show any remaining items not displayed in hierarchy
-    $remainingItems = @($allWorkItems.Values) | Where-Object { -not $displayedItems[$_.id] } | Sort-Object {
-        $typeOrder.IndexOf($_.fields.'System.WorkItemType'), $_.id
-    }
-
-    if ($remainingItems.Count -gt 0) {
-        $mdContent += "`n### Other Work Items`n"
-        foreach ($item in $remainingItems) {
-            $type = $item.fields.'System.WorkItemType' ?? 'Unknown'
-            $icon = $emojiMap[$type] ?? '🔹'
-            $parentInfo = if ($childToParentMap.ContainsKey($item.id)) { " (child of #$($childToParentMap[$item.id]))" }
-            $mdContent += "- $icon **$type #$($item.id)$parentInfo**: [$($item.fields.'System.Title')]($($item.url ?? "$orgUrl/$PROJECT_NAME/_workitems/edit/$($item.id)"))`n"
-        }
-    }
-
-    # Show missing parents if any
-    if ($missingParents.Count -gt 0) {
-        $mdContent += "`n### 🔍 Missing Parent References`n"
-        $mdContent += "The following parent work items are referenced but couldn't be loaded:`n"
-        foreach ($missingId in ($missingParents.Keys | Sort-Object)) {
-            $mdContent += "- ❓ #$missingId`n"
-        }
+    # Find root items (no parent)
+    $rootItems = $allWorkItems.Keys | Where-Object { -not $childToParent.ContainsKey($_) }
+    foreach ($rootId in $rootItems | Sort-Object) {
+        $mdContent += Format-Tree -id $rootId
     }
 }

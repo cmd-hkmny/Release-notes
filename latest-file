@@ -82,13 +82,6 @@
         $mdContent += "**Work Items Completed**: $($childWorkItems.Count)`n`n"
 
         if ($childWorkItems.Count -gt 0) {
-            $mdContent += "## All Work Items`n"
-            foreach ($item in $childWorkItems | Sort-Object -Property Type, Id) {
-                $mdContent += "* **$($item.Type) #$($item.Id)**: [$($item.Title)]($($item.Url))`n"
-            }
-            $mdContent += "`n"
-            
-            # Then show hierarchy view
             $mdContent += "## Work Items Hierarchy`n"
             
             $completeHierarchies = @()

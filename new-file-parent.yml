@@ -1,190 +1,117 @@
-      # Clone the source repository
-      $sourceDir = "$(Build.SourcesDirectory)/source_repo"
-      if (Test-Path $sourceDir) { Remove-Item $sourceDir -Recurse -Force }
-      Write-Host "Cloning source repository..."
-      git clone "https://$PERSONAL_ACCESS_TOKEN@dev.azure.com/$ORG_NAME/$PROJECT_NAME/_git/$REPO_NAME" $sourceDir
-      
-      # Move to source directory
-      Set-Location $sourceDir
+# Get Work Item Details
+        function Get-WorkItemDetails {
+            param($id)
+            if (-not $id) {
+                Write-Warning "Skipped work item with null ID"
+                return $null
+            }
+            $uri = "$orgUrl/$PROJECT_NAME/_apis/wit/workitems/${id}?`$expand=relations&api-version=$WIT_API_VERSION"
+            try {
+                $result = Invoke-RestMethod -Uri $uri -Headers $authHeader -ErrorAction SilentlyContinue
+                if ($result) {
+                    return [PSCustomObject]@{
+                        Id = $result.id
+                        Title = $result.fields.'System.Title'
+                        Type = $result.fields.'System.WorkItemType'
+                        Url = "$orgUrl/$PROJECT_NAME/_workitems/edit/$($result.id)"
+                        Relations = $result.relations
+                    }
+                }
+            } catch {
+                Write-Warning "Failed to fetch work item ${id}: $_"
+            }
+            return $null
+        }
 
-      # Fetch tags
-      Write-Host "Processing tags..."
-      $tags = git tag --sort=-creatordate
-      $latestTag = $tags | Select-Object -First 1
-      $previousTag = $tags | Select-Object -Skip 1 -First 1
+        # Collect work items
+        $allWorkItems = @{}
+        $childWorkItems = @()
 
-      if (-not $previousTag) { 
-          Write-Host "Only one tag found, using first commit as base"
-          $previousTag = git rev-list --max-parents=0 HEAD 
-      }
+        foreach ($pr in $filteredPRs) {
+            $workItems = Invoke-RestMethod -Uri "$orgUrl/$PROJECT_NAME/_apis/git/repositories/$REPO_NAME/pullRequests/$($pr.pullRequestId)/workitems?api-version=$GIT_API_VERSION" -Headers $authHeader
+            foreach ($item in $workItems.value) {
+                $wi = Get-WorkItemDetails -id $item.id
+                if ($wi -and $wi.Type -in @('Product Backlog Item', 'Bug', 'Feature', 'Task', 'Issue', 'User Story', 'Epic')) {
+                    if (-not $allWorkItems.ContainsKey($wi.Id)) {
+                        $allWorkItems[$wi.Id] = $wi
+                        $childWorkItems += $wi
+                    }
+                }
+            }
+        }
 
-      Write-Host "Getting commits between $previousTag and $latestTag"
-      $commitList = @(git log --pretty=format:"%H" "$previousTag..$latestTag")
-      $commitCount = $commitList.Count
+        # Build hierarchy
+        $hierarchies = @()
 
-      # Get merged PRs
-      Write-Host "Fetching merged pull requests..."
-      $prResponse = Invoke-RestMethod `
-          -Uri "$orgUrl/$PROJECT_NAME/_apis/git/repositories/$REPO_NAME/pullrequests?searchCriteria.status=completed&api-version=$GIT_API_VERSION" `
-          -Headers $authHeader
-      
-      $filteredPRs = @($prResponse.value | Where-Object { $commitList -contains $_.lastMergeCommit.commitId })
-      $prCount = $filteredPRs.Count
+        function Get-FullHierarchy {
+            param($item)
+            $hierarchy = @()
+            $current = $item
+            while ($current) {
+                $hierarchy += $current
+                $parentRel = $current.Relations | Where-Object { $_.rel -eq "System.LinkTypes.Hierarchy-Reverse" } | Select-Object -First 1
+                if (-not $parentRel) { break }
+                $parentId = $parentRel.url -split '/' | Select-Object -Last 1
+                if (-not $allWorkItems.ContainsKey($parentId)) {
+                    $parent = Get-WorkItemDetails -id $parentId
+                    if ($parent) {
+                        $allWorkItems[$parentId] = $parent
+                    } else {
+                        break
+                    }
+                }
+                $current = $allWorkItems[$parentId]
+            }
+            [Array]::Reverse($hierarchy)
+            return $hierarchy
+        }
 
-      # Function to get parent work item with better error handling
-      function Get-ParentWorkItem {
-          param(
-              [Parameter(Mandatory=$true)]
-              $workItem,
-              [Parameter(Mandatory=$true)]
-              $authHeader,
-              [Parameter(Mandatory=$true)]
-              $orgUrl,
-              [Parameter(Mandatory=$true)]
-              $projectName
-          )
-          
-          try {
-              # Check if work item has any relations
-              if (-not $workItem.relations) {
-                  Write-Host "Work item $($workItem.id) has no relations"
-                  return $null
-              }
+        $seen = @{}
+        foreach ($item in $childWorkItems) {
+            $hierarchy = Get-FullHierarchy -item $item
+            $key = ($hierarchy | ForEach-Object { $_.Id }) -join '-'
+            if (-not $seen.ContainsKey($key)) {
+                $hierarchies += ,$hierarchy
+                $seen[$key] = $true
+            }
+        }
 
-              # Find parent relation
-              $parentRelation = $workItem.relations | Where-Object { $_.rel -eq "System.LinkTypes.Hierarchy-Reverse" } | Select-Object -First 1
-              
-              if (-not $parentRelation) {
-                  Write-Host "Work item $($workItem.id) has no parent relation"
-                  return $null
-              }
+        # Generate markdown
+        Write-Host "Generating release notes..."
+        $mdContent = "# Release Notes for $REPO_NAME`n`n"
+        $mdContent += "**Release Range**: $previousTag to $latestTag`n"
+        $mdContent += "**Date**: $(Get-Date -Format 'yyyy-MM-dd')`n"
+        $mdContent += "**Commits Included**: $commitCount`n"
+        $mdContent += "**Pull Requests Merged**: $prCount`n"
+        $mdContent += "**Work Items Completed**: $($childWorkItems.Count)`n`n"
 
-              # Extract parent ID from URL
-              $parentId = $parentRelation.url -split '/' | Select-Object -Last 1
-              if (-not $parentId) {
-                  Write-Host "Could not extract parent ID from relation URL"
-                  return $null
-              }
+        if ($hierarchies.Count -gt 0) {
+            $mdContent += "## Work Items Hierarchy`n"
+            foreach ($hierarchy in $hierarchies) {
+                for ($i = 0; $i -lt $hierarchy.Count; $i++) {
+                    $item = $hierarchy[$i]
+                    $indent = "  " * $i
+                    $icon = if ($i -eq $hierarchy.Count - 1) { "🔧" } elseif ($i -eq 0) { "🏰" } else { "🧩" }
+                    $mdContent += "$indent* $icon **$($item.Type) #$($item.Id)**: [$($item.Title)]($($item.Url))`n"
+                }
+                $mdContent += "`n"
+            }
+        }
 
-              # Get parent work item details
-              $parentUri = "$orgUrl/$projectName/_apis/wit/workitems/$($parentId)?api-version=$WIT_API_VERSION"
-              Write-Host "Fetching parent work item from: $parentUri"
-              
-              $parentItem = Invoke-RestMethod -Uri $parentUri -Headers $authHeader
-              
-              return @{
-                  Id = $parentItem.id
-                  Title = $parentItem.fields.'System.Title'
-                  Type = $parentItem.fields.'System.WorkItemType'
-                  Url = "$orgUrl/$projectName/_workitems/edit/$($parentItem.id)"
-              }
-          }
-          catch {
-              Write-Host "Error getting parent for work item $($workItem.id): $($_.Exception.Message)"
-              return $null
-          }
-      }
+        if ($prCount -gt 0) {
+            $mdContent += "## Pull Requests`n"
+            $mdContent += ($filteredPRs | Sort-Object -Property pullRequestId | ForEach-Object {
+                $prDate = [datetime]::Parse($_.creationDate)
+                "* **PR #$($_.pullRequestId)**: [$($_.title)]($orgUrl/$PROJECT_NAME/_git/$REPO_NAME/pullrequest/$($_.pullRequestId)) (Created by $($_.createdBy.displayName) on $($prDate.ToString('yyyy-MM-dd')))"
+            }) -join "`n"
+            $mdContent += "`n`n"
+        }
 
-      # Get linked work items with parent information
-      Write-Host "Fetching linked work items..."
-      $workItemsWithParents = @()
-      
-      if ($filteredPRs.Count -gt 0) {
-          $prIds = $filteredPRs.pullRequestId -join ","
-          Write-Host "Processing PRs: $prIds"
-          
-          foreach ($pr in $filteredPRs) {
-              try {
-                  Write-Host "Getting work items for PR $($pr.pullRequestId)"
-                  $workItems = Invoke-RestMethod `
-                      -Uri "$orgUrl/$PROJECT_NAME/_apis/git/repositories/$REPO_NAME/pullRequests/$($pr.pullRequestId)/workitems?api-version=$GIT_API_VERSION" `
-                      -Headers $authHeader
-                  
-                  if ($workItems.value) {
-                      $ids = $workItems.value.id -join ","
-                      Write-Host "Getting details for work items: $ids"
-                      
-                      $items = Invoke-RestMethod `
-                          -Uri "$orgUrl/_apis/wit/workitems?ids=$ids&`$expand=relations&api-version=$WIT_API_VERSION" `
-                          -Headers $authHeader
-                      
-                      foreach ($item in $items.value) {
-                          if ($item.fields.'System.WorkItemType' -in @('Product Backlog Item', 'Bug', 'Feature', 'Task', 'Issue')) {
-                              $parentInfo = Get-ParentWorkItem -workItem $item -authHeader $authHeader -orgUrl $orgUrl -projectName $PROJECT_NAME
-                              
-                              $workItemsWithParents += [PSCustomObject]@{
-                                  WorkItem = $item
-                                  Parent = $parentInfo
-                              }
-                          }
-                      }
-                  }
-              }
-              catch {
-                  Write-Host "Error processing PR $($pr.pullRequestId): $($_.Exception.Message)"
-              }
-          }
-      }
+        $mdContent += "[[_Back to Releases|Home]]`n"
 
-      # Generate Markdown content
-      Write-Host "Generating release notes..."
-      $mdContent = "# Release Notes for $REPO_NAME`n`n"
-      $mdContent += "**Release Range**: $previousTag to $latestTag`n"
-      $mdContent += "**Date**: $(Get-Date -Format 'yyyy-MM-dd')`n"
-      $mdContent += "**Commits Included**: $commitCount`n"
-      $mdContent += "**Pull Requests Merged**: $prCount`n"
-      $mdContent += "**Work Items Completed**: $($workItemsWithParents.Count)`n`n"
+        $artifactFilePath = "$ARTIFACT_DIR/$REPO_NAME-$latestTag.md"
+        $mdContent | Out-File -FilePath $artifactFilePath -Encoding utf8
 
-      if ($workItemsWithParents.Count -gt 0) {
-          $mdContent += "## Work Items`n"
-
-          # Group by Parent ID
-          # Group and format work items by parent (deduplicated)
-          Write-Host "Grouping and formatting work items..."
-
-          # Remove duplicates based on WorkItem.id
-          $uniqueWorkItems = $workItemsWithParents | Sort-Object { $_.WorkItem.id } -Unique
-
-          $groupedByParent = $uniqueWorkItems | Group-Object { $_.Parent?.Id }
-
-          $mdContent += "## Work Items`n"
-
-          foreach ($group in $groupedByParent) {
-              $parent = $group.Group[0].Parent
-              if ($parent) {
-                  $mdContent += "* 🧩 **$($parent.Type) #$($parent.Id)**: [$($parent.Title)]($($parent.Url))`n"
-                  foreach ($item in $group.Group) {
-                      $wi = $item.WorkItem
-                      $mdContent += "  * 🔧 **$($wi.fields.'System.WorkItemType') #$($wi.id)**: [$($wi.fields.'System.Title')]($orgUrl/$PROJECT_NAME/_workitems/edit/$($wi.id))`n"
-                  }
-                  $mdContent += "`n"
-              } else {
-                  # Orphan work items
-                  foreach ($item in $group.Group) {
-                      $wi = $item.WorkItem
-                      $mdContent += "* 🔧 **$($wi.fields.'System.WorkItemType') #$($wi.id)**: [$($wi.fields.'System.Title')]($orgUrl/$PROJECT_NAME/_workitems/edit/$($wi.id))`n"
-                  }
-                  $mdContent += "`n"
-              }
-          }
-        }  
-
-      if ($prCount -gt 0) {
-          $mdContent += "## Pull Requests`n"
-          $mdContent += ($filteredPRs | Sort-Object -Property pullRequestId | ForEach-Object {
-              "* **PR #$($_.pullRequestId)**: [$($_.title)]($orgUrl/$PROJECT_NAME/_git/$REPO_NAME/pullrequest/$($_.pullRequestId)) (Created by $($_.createdBy.displayName) on $([datetime]$_.creationDate.ToString('yyyy-MM-dd')))"
-          }) -join "`n"
-          $mdContent += "`n`n"
-      }
-
-      $mdContent += "[[_Back to Releases|Home]]`n"
-
-      # Save to artifact directory
-      $artifactFilePath = "$ARTIFACT_DIR/$REPO_NAME-$latestTag.md"
-      Write-Host "Saving release notes to artifact: $artifactFilePath"
-      $mdContent | Out-File -FilePath $artifactFilePath -Encoding utf8
-
-      # Set variables for next steps
-      Write-Host "##vso[task.setvariable variable=RELEASE_NOTES_CONTENT]$mdContent"
-      Write-Host "##vso[task.setvariable variable=RELEASE_NOTES_FILE]$artifactFilePath"
-      Write-Host "##vso[task.setvariable variable=RELEASE_NOTES_PATH]$WIKI_FOLDER/$REPO_NAME-$latestTag"
+        Write-Host "##vso[task.setvariable variable=RELEASE_NOTES_CONTENT]$mdContent"
+        Write-Host "##vso[task.setvariable variable=RELEASE_NOTES_FILE]$artifactFilePath"
+        Write-Host "##vso[task.setvariable variable=RELEASE_NOTES_PATH]$WIKI_FOLDER/$REPO_NAME-$latestTag"

@@ -1,190 +1,195 @@
-trigger: none
-pool:
-  vmImage: 'windows-latest'
+param(
+    [string]$Org,
+    [string]$Project,
+    [string]$Pat,
+    [string]$ApiVersion = "7.1-preview.4",
+    [string]$PipelineIds
+)
 
-variables:
-  azureDevOpsOrg: "chand1502877"
-  azureDevOpsProject: "DevOps_pro1"
-  pipelineIds: "4"
+$PipelineIds = $PipelineIds -split "," | ForEach-Object { [int]$_.Trim() }
+
+$AuthHeader = "Basic " + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$Pat"))
+$Headers = @{
+    "Authorization" = $AuthHeader
+    "Content-Type" = "application/json"
+    "Accept" = "application/json; api-version=$ApiVersion"
+}
+
+Function Add-ProdStage {
+    param ([int]$PipelineId)
+
+    Write-Host "🚀 Processing Pipeline ID: $PipelineId"
+
+    $url = "https://vsrm.dev.azure.com/$Org/$Project/_apis/release/definitions/$($PipelineId)?api-version=$ApiVersion"
+    try {
+        $response = Invoke-RestMethod -Uri $url -Headers $Headers -Method Get
+        $pipeline = $response | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+        Write-Host "✅ Successfully fetched pipeline ID: $PipelineId"
+    } catch {
+        Write-Host "❌ ERROR: Failed to fetch pipeline ID: $PipelineId"
+        Write-Host "🔴 API Response: $_"
+        return
+    }
+
+    Write-Host "🔍 Available Stages in Pipeline ${PipelineId}:"
+    $pipeline.environments | ForEach-Object { Write-Host "Stage: $($_.name) (ID: $($_.id))" }
+
+    $preProdStage = $pipeline.environments | Where-Object { $_.name -eq 'pre-prod' } | Select-Object -First 1
+    if ($null -eq $preProdStage) {
+        Write-Host "⚠️ No pre-prod stage found in pipeline $PipelineId"
+        return
+    }
+
+    Write-Host "✅ Found pre-prod stage in pipeline $PipelineId (ID: $($preProdStage.id))"
+
+    if ($pipeline.environments.name -contains 'prod') {
+        Write-Host "⚠️ PROD stage already exists in pipeline $PipelineId"
+        return
+    }
+
+    for ($i = 0; $i -lt $pipeline.environments.Count; $i++) {
+        $pipeline.environments[$i].rank = $i + 1
+    }
+
+    $newRank = $pipeline.environments.Count + 1
+
+    $prodStage = @{
+        name = "prod"
+        rank = $newRank
+        owner = @{
+            id = $pipeline.createdBy.id
+            displayName = $pipeline.createdBy.displayName
+        }
+        variables = @{}
+        variableGroups = @()
+        preDeployApprovals = @{
+            approvals = @(
+                @{
+                    rank = 1
+                    isAutomated = $false
+                    isNotificationOn = $false
+                    approver = @{ 
+                        id = "7a7ba7bf-0a4e-625b-b1fb-8dd3e8dcb937"
+                        displayName = "Krishna Sri Ram"
+                    }
+                }
+            )
+            approvalOptions = @{
+                requiredApproverCount = 1
+                releaseCreatorCanBeApprover = $true
+                autoTriggeredAndPreviousEnvironmentApprovedCanBeSkipped = $false
+                enforceIdentityRevalidation = $false
+                timeoutInMinutes = 43200
+            }
+        }
+        postDeployApprovals = @{
+            approvals = @()
+            approvalOptions = @{
+                requiredApproverCount = 0
+                releaseCreatorCanBeApprover = $false
+                autoTriggeredAndPreviousEnvironmentApprovedCanBeSkipped = $false
+                enforceIdentityRevalidation = $false
+                timeoutInMinutes = 43200
+            }
+        }
+        deployPhases = @(
+            @{
+                name = "Run on agent"
+                rank = 1
+                phaseType = "agentBasedDeployment"
+                workflowTasks = @()
+            }
+        )
+        conditions = @(
+            @{
+                conditionType = "environmentState"
+                name = "pre-prod"
+                value = "succeeded"
+            }
+        )
+        environmentOptions = @{
+            emailNotificationType = "OnlyOnFailure"
+            emailRecipients = "release.environment.owner;release.creator"
+            skipArtifactsDownload = $false
+            timeoutInMinutes = 0
+            enableAccessToken = $false
+            publishDeploymentStatus = $true
+            badgeEnabled = $false
+            autoLinkWorkItems = $false
+        }
+        retentionPolicy = @{
+            daysToKeep = 30
+            releasesToKeep = 3
+            retainBuild = $true
+        }
+    }
+
+    $prodStage = $prodStage | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+    $pipeline.environments += $prodStage
+
+    for ($i = 0; $i -lt $pipeline.environments.Count; $i++) {
+        $pipeline.environments[$i].rank = $i + 1
+    }
+
+    $updateUrl = "https://vsrm.dev.azure.com/$Org/$Project/_apis/release/definitions/$($PipelineId)?api-version=$ApiVersion"
+    $jsonBody = $pipeline | ConvertTo-Json -Depth 15 -Compress
+
+    try {
+        $response = Invoke-RestMethod -Uri $updateUrl -Headers $Headers -Method Put -Body $jsonBody
+        Write-Host "✅ Successfully added PROD stage to Pipeline $PipelineId"
+        Write-Host "🔹 Final Stage Order:"
+        $response.environments | ForEach-Object { Write-Host "$($_.rank). $($_.name) (ID: $($_.id))" }
+    } catch {
+        Write-Host "❌ ERROR: Failed to update pipeline ID: $PipelineId"
+        Write-Host "🔴 Error Details: $($_.Exception.Message)"
+        if ($_.Exception.Response) {
+            $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
+            $reader.BaseStream.Position = 0
+            $reader.DiscardBufferedData()
+            $responseBody = $reader.ReadToEnd()
+            Write-Host "🔴 Full API Response: $responseBody"
+        }
+    }
+}
+
+foreach ($PipelineId in $PipelineIds) {
+    Add-ProdStage -PipelineId $PipelineId
+}
+
+
+trigger: none
+
+parameters:
+  - name: org
+    type: string
+    default: your-org-name
+  - name: project
+    type: string
+    default: your-project-name
+  - name: pipelineIds
+    type: string
+    default: '2'  # comma-separated list if needed
 
 stages:
 - stage: UpdateReleasePipeline
   displayName: 'Update Classic Release Pipeline'
+  variables:
+    - group: ADO_PAT  # <- pulls in your 'pat' variable securely
   jobs:
-  - job: UpdatePipeline
-    displayName: 'Add PROD Stage to Classic Release Pipelines'
+  - job: AddProdStage
+    displayName: 'Add PROD stage to release pipeline'
+    pool:
+      vmImage: 'windows-latest'
     steps:
+    - checkout: self
+
     - task: PowerShell@2
-      displayName: 'Modify Classic Release Pipeline'
+      displayName: 'Run prod-stage-creation.ps1'
       inputs:
-        targetType: 'inline'
-        script: |
-          $Org = "$(azureDevOpsOrg)"
-          $Project = "$(azureDevOpsProject)"
-          $Pat = "AMNGntv1LLRpLKlNL82zFDouDPYm5fu6fsFzl3GC0jTx80cHNMqQJQQJ99BBACAAAAAMVcP5AAASAZDO1Dur"
-          $ApiVersion = "7.1-preview.4"
-          $PipelineIds = "$(pipelineIds)" -split "," | ForEach-Object { [int]$_.Trim() }
-
-          $AuthHeader = "Basic " + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$Pat"))
-          $Headers = @{
-              "Authorization" = $AuthHeader
-              "Content-Type" = "application/json"
-              "Accept" = "application/json; api-version=$ApiVersion"
-          }
-
-          Function Add-ProdStage {
-              param ([int]$PipelineId)
-
-              Write-Host "🚀 Processing Pipeline ID: $PipelineId"
-
-              $url = "https://vsrm.dev.azure.com/$Org/$Project/_apis/release/definitions/$($PipelineId)?api-version=$ApiVersion"
-              try {
-                  $response = Invoke-RestMethod -Uri $url -Headers $Headers -Method Get
-                  $pipeline = $response | ConvertTo-Json -Depth 20 | ConvertFrom-Json
-                  Write-Host "✅ Successfully fetched pipeline ID: $PipelineId"
-              } catch {
-                  Write-Host "❌ ERROR: Failed to fetch pipeline ID: $PipelineId"
-                  Write-Host "🔴 API Response: $_"
-                  return
-              }
-
-              Write-Host "🔍 Available Stages in Pipeline ${PipelineId}:"
-              $pipeline.environments | ForEach-Object { Write-Host "Stage: $($_.name) (ID: $($_.id))" }
-
-              $preProdStage = $pipeline.environments | Where-Object { $_.name -eq 'pre-prod' } | Select-Object -First 1
-              if ($null -eq $preProdStage) {
-                  Write-Host "⚠️ No pre-prod stage found in pipeline $PipelineId"
-                  return
-              }
-
-              Write-Host "✅ Found pre-prod stage in pipeline $PipelineId (ID: $($preProdStage.id))"
-
-              if ($pipeline.environments.name -contains 'prod') {
-                  Write-Host "⚠️ PROD stage already exists in pipeline $PipelineId"
-                  return
-              }
-
-              # Reassign rank to existing stages
-              for ($i = 0; $i -lt $pipeline.environments.Count; $i++) {
-                  $pipeline.environments[$i].rank = $i + 1
-              }
-
-              $newRank = $pipeline.environments.Count + 1
-
-              # Do not manually set 'id' for the new 'prod' stage
-              $prodStage = @{
-                  name = "prod"
-                  rank = $newRank
-                  owner = @{
-                      id = $pipeline.createdBy.id
-                      displayName = $pipeline.createdBy.displayName
-                  }
-                  variables = @{}
-                  variableGroups = @()
-                  preDeployApprovals = @{
-                      approvals = @(
-                          @{
-                              rank = 1
-                              isAutomated = $false
-                              isNotificationOn = $false
-                              approver = @{ 
-                                  id = "7a7ba7bf-0a4e-625b-b1fb-8dd3e8dcb937"
-                                  displayName = "Krishna Sri Ram"
-                              }
-                          }
-                      )
-                      approvalOptions = @{
-                          requiredApproverCount = 1
-                          releaseCreatorCanBeApprover = $true
-                          autoTriggeredAndPreviousEnvironmentApprovedCanBeSkipped = $false
-                          enforceIdentityRevalidation = $false
-                          timeoutInMinutes = 43200
-                      }
-                  }
-                  postDeployApprovals = @{
-                      approvals = @(
-                          @{
-                              rank = 1
-                              isAutomated = $true
-                              isNotificationOn = $false
-                              approver = @{
-                                  id = "00000000-0000-0000-0000-000000000000"
-                                  displayName = "Automatic"
-                              }
-                          }
-                      )
-                      approvalOptions = @{
-                          requiredApproverCount = 0
-                          releaseCreatorCanBeApprover = $false
-                          autoTriggeredAndPreviousEnvironmentApprovedCanBeSkipped = $false
-                          enforceIdentityRevalidation = $false
-                          timeoutInMinutes = 43200
-                      }
-                  }
-                  deployPhases = @(
-                      @{
-                          name = "Run on agent"
-                          rank = 1
-                          phaseType = "agentBasedDeployment"
-                          workflowTasks = @()
-                      }
-                  )
-                  conditions = @(
-                      @{
-                          conditionType = "environmentState"
-                          name = "pre-prod"  # Fixed the condition to depend on pre-prod
-                          value = "succeeded"
-                      }
-                  )
-                  environmentOptions = @{
-                      emailNotificationType = "OnlyOnFailure"
-                      emailRecipients = "release.environment.owner;release.creator"
-                      skipArtifactsDownload = $false
-                      timeoutInMinutes = 0
-                      enableAccessToken = $false
-                      publishDeploymentStatus = $true
-                      badgeEnabled = $false
-                      autoLinkWorkItems = $false
-                  }
-                  retentionPolicy = @{
-                      daysToKeep = 30
-                      releasesToKeep = 3
-                      retainBuild = $true
-                  }
-              }
-
-              # Remove manually setting 'id' for the prodStage
-              $prodStage = $prodStage | ConvertTo-Json -Depth 10 | ConvertFrom-Json
-
-              # Add the 'prod' stage to the pipeline environments
-              $pipeline.environments += $prodStage
-
-              # Reassign rank order for all stages
-              for ($i = 0; $i -lt $pipeline.environments.Count; $i++) {
-                  $pipeline.environments[$i].rank = $i + 1
-              }
-
-              $updateUrl = "https://vsrm.dev.azure.com/$Org/$Project/_apis/release/definitions/$($PipelineId)?api-version=$ApiVersion"
-              $jsonBody = $pipeline | ConvertTo-Json -Depth 15 -Compress
-
-              try {
-                  $response = Invoke-RestMethod -Uri $updateUrl -Headers $Headers -Method Put -Body $jsonBody
-                  Write-Host "✅ Successfully added PROD stage to Pipeline $PipelineId"
-                  Write-Host "🔹 Final Stage Order:"
-                  $response.environments | ForEach-Object { Write-Host "$($_.rank). $($_.name) (ID: $($_.id))" }
-              } catch {
-                  Write-Host "❌ ERROR: Failed to update pipeline ID: $PipelineId"
-                  Write-Host "🔴 Error Details: $($_.Exception.Message)"
-                  if ($_.Exception.Response) {
-                      $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
-                      $reader.BaseStream.Position = 0
-                      $reader.DiscardBufferedData()
-                      $responseBody = $reader.ReadToEnd()
-                      Write-Host "🔴 Full API Response: $responseBody"
-                  }
-              }
-          }
-
-          foreach ($PipelineId in $PipelineIds) {
-              Add-ProdStage -PipelineId $PipelineId
-          }
+        targetType: 'filePath'
+        filePath: 'prod-stage-creation.ps1'
+        arguments: >
+          -Org "$(org)"
+          -Project "$(project)"
+          -Pat "$(pat)"
+          -PipelineIds "$(pipelineIds)"

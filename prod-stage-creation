@@ -193,3 +193,22 @@ stages:
           -Project "$(project)"
           -Pat "$(pat)"
           -PipelineIds "$(pipelineIds)"
+
+
+# Replace these values
+$Org = "your-org-name"
+$Pat = "your-personal-access-token"
+
+$Headers = @{
+    Authorization = ("Basic {0}" -f [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$Pat")))
+    Accept = "application/json"
+}
+
+# Get current authenticated user profile
+$url = "https://vssps.dev.azure.com/$Org/_apis/profile/profiles/me?api-version=7.1-preview.1"
+
+$response = Invoke-RestMethod -Uri $url -Headers $Headers -Method Get
+Write-Host "🔹 Display Name: $($response.displayName)"
+Write-Host "🔹 Email: $($response.emailAddress)"
+Write-Host "🔹 ID: $($response.id)"  # This is the GUID you can use for approvals
+

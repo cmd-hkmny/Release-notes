@@ -226,3 +226,44 @@ preDeployApprovals = @{
 group id : GET https://vssps.dev.azure.com/{organization}/_apis/graph/groups?scopeDescriptor=Microsoft.TeamFoundation.Project%3A{projectId}&api-version=7.1-preview.1
 project id : GET https://dev.azure.com/{organization}/_apis/projects?api-version=7.1-preview.4
 
+$prodStage = @{
+    name = "prod"
+    rank = $newRank
+    owner = @{
+        id = $pipeline.createdBy.id
+        displayName = $pipeline.createdBy.displayName
+    }
+    variables = @{}
+    variableGroups = @()
+    preDeployApprovals = @{
+        approvals = @(
+            @{
+                rank = 1
+                isAutomated = $false
+                isNotificationOn = $false
+                approver = @{ 
+                    id = "7a7ba7bf-0a4e-625b-b1fb-8dd3e8dcb937"  # Replace with a valid user/group ID
+                    displayName = "Krishna Sri Ram"
+                }
+            }
+        )
+        approvalOptions = @{
+            requiredApproverCount = 1
+            releaseCreatorCanBeApprover = $true
+            autoTriggeredAndPreviousEnvironmentApprovedCanBeSkipped = $false
+            enforceIdentityRevalidation = $false
+            timeoutInMinutes = 43200
+        }
+    }
+    postDeployApprovals = @{
+        approvals = @()  # Explicit empty array (required)
+        approvalOptions = @{
+            requiredApproverCount = 0
+            releaseCreatorCanBeApprover = $false
+            autoTriggeredAndPreviousEnvironmentApprovedCanBeSkipped = $false
+            enforceIdentityRevalidation = $false
+            timeoutInMinutes = 43200
+        }
+    }
+    # ... (rest of your config remains the same)
+}

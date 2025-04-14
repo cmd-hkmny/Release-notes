@@ -222,3 +222,7 @@ preDeployApprovals = @{
         timeoutInMinutes = 43200
     }
 }
+
+group id : GET https://vssps.dev.azure.com/{organization}/_apis/graph/groups?scopeDescriptor=Microsoft.TeamFoundation.Project%3A{projectId}&api-version=7.1-preview.1
+project id : GET https://dev.azure.com/{organization}/_apis/projects?api-version=7.1-preview.4
+

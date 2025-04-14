@@ -212,3 +212,13 @@ Write-Host "🔹 Display Name: $($response.displayName)"
 Write-Host "🔹 Email: $($response.emailAddress)"
 Write-Host "🔹 ID: $($response.id)"  # This is the GUID you can use for approvals
 
+preDeployApprovals = @{
+    approvals = @()
+    approvalOptions = @{
+        requiredApproverCount = 0
+        releaseCreatorCanBeApprover = $false
+        autoTriggeredAndPreviousEnvironmentApprovedCanBeSkipped = $false
+        enforceIdentityRevalidation = $false
+        timeoutInMinutes = 43200
+    }
+}

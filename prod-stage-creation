@@ -267,3 +267,123 @@ $prodStage = @{
     }
     # ... (rest of your config remains the same)
 }
+-------------------------------------------------------------------------------------------------------------------------------------------------
+param(
+    [string]$Org,
+    [string]$Project,
+    [string]$Pat,
+    [string]$ApiVersion = "7.1-preview.4",
+    [string]$PipelineIds
+)
+
+$PipelineIds = $PipelineIds -split "," | ForEach-Object { [int]$_.Trim() }
+
+$AuthHeader = "Basic " + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$Pat"))
+$Headers = @{
+    "Authorization" = $AuthHeader
+    "Content-Type" = "application/json"
+    "Accept" = "application/json; api-version=$ApiVersion"
+}
+
+Function Add-ProdStage {
+    param ([int]$PipelineId)
+
+    Write-Host "Processing Pipeline ID: $PipelineId"
+
+    $url = "https://vsrm.dev.azure.com/$Org/$Project/_apis/release/definitions/$($PipelineId)?api-version=$ApiVersion"
+    try {
+        $response = Invoke-RestMethod -Uri $url -Headers $Headers -Method Get
+        $pipeline = $response | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+        Write-Host "Successfully fetched pipeline ID: $PipelineId"
+    } catch {
+        Write-Host "ERROR: Failed to fetch pipeline ID: $PipelineId"
+        Write-Host "API Response: $_"
+        return
+    }
+
+    $preProdStage = $pipeline.environments | Where-Object { $_.name -eq 'pre-prod' } | Select-Object -First 1
+    if ($null -eq $preProdStage) {
+        Write-Host "No pre-prod stage found in pipeline $PipelineId"
+        return
+    }
+
+    if ($pipeline.environments.name -contains 'prod') {
+        Write-Host "PROD stage already exists in pipeline $PipelineId"
+        return
+    }
+
+    # Deep clone the pre-prod stage
+    $prodStage = $preProdStage | ConvertTo-Json -Depth 15 | ConvertFrom-Json
+    
+    # Remove the ID to ensure Azure DevOps generates a new one
+    $prodStage.PSObject.Properties.Remove('id')
+    
+    # Update basic properties
+    $prodStage.name = "prod"
+    $prodStage.rank = $pipeline.environments.Count + 1
+    
+    # Safely update approval display names
+    if ($prodStage.preDeployApprovals -and $prodStage.preDeployApprovals.approvals) {
+        foreach ($approval in $prodStage.preDeployApprovals.approvals) {
+            $approval.PSObject.Properties.Remove('id')
+            if ($approval.approver -and $approval.approver.displayName) {
+                $approval.approver.displayName = "Prod Approval: " + $approval.approver.displayName
+            }
+            elseif ($approval.approver) {
+                # If approver exists but no displayName, add one
+                $approval.approver | Add-Member -NotePropertyName "displayName" -NotePropertyValue "Prod Approver" -Force
+            }
+        }
+    }
+    
+    if ($prodStage.postDeployApprovals -and $prodStage.postDeployApprovals.approvals) {
+        foreach ($approval in $prodStage.postDeployApprovals.approvals) {
+            $approval.PSObject.Properties.Remove('id')
+            if ($approval.approver -and $approval.approver.displayName) {
+                $approval.approver.displayName = "Prod Approval: " + $approval.approver.displayName
+            }
+            elseif ($approval.approver) {
+                $approval.approver | Add-Member -NotePropertyName "displayName" -NotePropertyValue "Prod Approver" -Force
+            }
+        }
+    }
+
+    # Update conditions to depend on pre-prod success
+    $prodStage.conditions = @(
+        @{
+            conditionType = "environmentState"
+            name = "pre-prod"
+            value = "succeeded"
+        }
+    )
+
+    # Add the prod stage to the pipeline
+    $pipeline.environments += $prodStage
+
+    # Re-rank all stages
+    for ($i = 0; $i -lt $pipeline.environments.Count; $i++) {
+        $pipeline.environments[$i].rank = $i + 1
+    }
+
+    $updateUrl = "https://vsrm.dev.azure.com/$Org/$Project/_apis/release/definitions/$($PipelineId)?api-version=$ApiVersion"
+    $jsonBody = $pipeline | ConvertTo-Json -Depth 15 -Compress
+
+    try {
+        $response = Invoke-RestMethod -Uri $updateUrl -Headers $Headers -Method Put -Body $jsonBody
+        Write-Host "Successfully added PROD stage (cloned from pre-prod) to Pipeline $PipelineId"
+    } catch {
+        Write-Host "ERROR: Failed to update pipeline ID: $PipelineId"
+        Write-Host "Error Details: $($_.Exception.Message)"
+        if ($_.Exception.Response) {
+            $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
+            $reader.BaseStream.Position = 0
+            $reader.DiscardBufferedData()
+            $responseBody = $reader.ReadToEnd()
+            Write-Host "Full API Response: $responseBody"
+        }
+    }
+}
+
+foreach ($PipelineId in $PipelineIds) {
+    Add-ProdStage -PipelineId $PipelineId
+}

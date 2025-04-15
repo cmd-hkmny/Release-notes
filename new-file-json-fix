@@ -1,0 +1,12 @@
+try {
+    $response = Invoke-RestMethod -Uri $Url -Method Post -Headers $headers -Body $bodyString
+}
+catch {
+    Write-Host "StatusCode:" $_.Exception.Response.StatusCode.value__
+    Write-Host "StatusDescription:" $_.Exception.Response.StatusDescription
+    $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
+    $reader.BaseStream.Position = 0
+    $reader.DiscardBufferedData()
+    $responseBody = $reader.ReadToEnd()
+    Write-Host "Response body: $responseBody"
+}

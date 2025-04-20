@@ -1,0 +1,176 @@
+param(
+    [string]$Org,
+    [string]$Project,
+    [string]$Pat,
+    [string]$ApiVersion = "7.1-preview.4",
+    [string]$PipelineIds,
+    [string]$ConfigPath,        # Path to JSON or CSV for server config
+    [string]$ApprovalGroupId    # ID of new approval group to assign
+)
+
+#$PipelineIds = $PipelineIds -split "," | ForEach-Object { [int]$_.Trim() }
+#$PipelineIds = $PipelineIds -split "," | Where-Object { $_.Trim() -match '^\d+$' } | ForEach-Object { [int]$_.Trim() }
+$PipelineIds = $PipelineIds -split "," | Where-Object {
+    $_.Trim() -match '^\d+$'
+} | ForEach-Object {
+    [int]$_.Trim()
+}
+
+if (-not $PipelineIds -or $PipelineIds.Count -eq 0) {
+    Write-Error "No valid numeric Pipeline IDs found. Please check the input."
+    exit 1
+}
+
+$AuthHeader = "Basic " + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$Pat"))
+$Headers = @{
+    "Authorization" = $AuthHeader
+    "Content-Type"  = "application/json"
+    "Accept"        = "application/json; api-version=$ApiVersion"
+}
+
+# Load server configuration
+if ($ConfigPath -match "\.json$") {
+    $ServerConfig = Get-Content -Path $ConfigPath | ConvertFrom-Json
+} elseif ($ConfigPath -match "\.csv$") {
+    $ServerConfig = Import-Csv -Path $ConfigPath | Select-Object -First 1
+} else {
+    Write-Host "Unsupported config format. Use JSON or CSV."
+    return
+}
+
+Function Add-ProdStage {
+    param ([int]$PipelineId)
+
+    Write-Host "`n Processing Pipeline ID: $PipelineId"
+
+    $url = "https://vsrm.dev.azure.com/$Org/$Project/_apis/release/definitions/${PipelineId}?api-version=$ApiVersion"
+    try {
+        $pipeline = Invoke-RestMethod -Uri $url -Headers $Headers -Method Get
+    } catch {
+        Write-Host "ERROR fetching pipeline ID: $PipelineId. $_"
+        return
+    }
+
+    $preProdStage = $pipeline.environments | Where-Object { $_.name -eq 'pre-prod' } | Select-Object -First 1
+    if (-not $preProdStage) {
+        Write-Host " No pre-prod stage found in pipeline $PipelineId"
+        return
+    }
+
+    if ($pipeline.environments.name -contains 'prod') {
+        Write-Host "PROD stage already exists in pipeline $PipelineId"
+        return
+    }
+
+    $prodStage = [System.Management.Automation.PSSerializer]::Deserialize(
+        [System.Management.Automation.PSSerializer]::Serialize($preProdStage)
+    )
+
+    $prodStage.PSObject.Properties.Remove('id')
+    $prodStage.name = "prod"
+    $prodStage.rank = $pipeline.environments.Count + 1
+
+    foreach ($phase in $prodStage.deployPhases) {
+        $phase.PSObject.Properties.Remove('phaseId')
+        foreach ($task in $phase.workflowTasks) {
+            $task.PSObject.Properties.Remove('id')
+        }
+
+        # Add health check + rollback task
+        $healthCheckTask = @{
+            name = "HealthCheckAndRollback"
+            taskId = "d2d79f2f-0f27-4c6d-9093-01484b2234f4"  # Use actual task ID if available
+            version = "2.*"
+            enabled = $true
+            inputs = @{
+                ScriptType = "InlineScript"
+                ScriptName = "HealthCheck.ps1"
+                InlineScript = @"
+\$response = Invoke-WebRequest -Uri 'https://app-001-funtions-test/api/health' -UseBasicParsing
+if (\$response.StatusCode -ne 200) {
+    Write-Host 'Health check failed. Initiating rollback...'
+    \$DeploymentRoot = '${ServerConfig.DeploymentRoot}'
+    \$WebApplicationName = '${ServerConfig.WebApplicationName}'
+
+    \$folders = Get-ChildItem -Path \$DeploymentRoot -Directory |
+        Where-Object { \$_.Name -match '^\\d+(\\.\\d+)*_\\d{8}\\.\\d{6}\$' } |
+        Sort-Object {
+            \$timestamp = \$_.Name.Split('_')[1]
+            [datetime]::ParseExact(\$timestamp, 'ddMMyyyy.HHmmss', \$null)
+        } -Descending
+
+    if (\$folders.Count -gt 1) {
+        \$rollbackFolder = \$folders[1].FullName
+        Set-ItemProperty -Path "IIS:\\Sites\\Default Web Site\\\$WebApplicationName" -Name physicalPath -Value \$rollbackFolder
+        Write-Host "Rolled back to: \$rollbackFolder"
+    } else {
+        Write-Host 'No rollback folder found.'
+    }
+}
+"@
+            }
+        }
+        $phase.workflowTasks += $healthCheckTask
+    }
+
+    # Update approvals
+    foreach ($approval in $prodStage.preDeployApprovals.approvals) {
+        $approval.PSObject.Properties.Remove('id')
+        $approval.approver = @{
+            id        = $ApprovalGroupId
+            displayName = "PROD Approval Group"
+            isGroup   = $true
+        }
+    }
+
+    foreach ($approval in $prodStage.postDeployApprovals.approvals) {
+    Write-Host "Checking approval object structure: $approval"
+    
+    # If the approver doesn't exist, let's initialize it with the proper structure
+    if (-not $approval.PSObject.Properties["approver"]) {
+        Write-Host "The 'approver' property doesn't exist. Adding it."
+        $approval | Add-Member -MemberType NoteProperty -Name "approver" -Value @{
+            id          = $ApprovalGroupId
+            displayName = "PROD Approval Group"
+            isGroup     = $true
+        }
+    } else {
+        Write-Host "Updating approver"
+        $approval.approver = @{
+            id          = $ApprovalGroupId
+            displayName = "PROD Approval Group"
+            isGroup     = $true
+        }
+    }
+}
+    # Set dependency on pre-prod
+    $prodStage.conditions = @(
+        @{
+            conditionType = "environmentState"
+            name = "pre-prod"
+            value = "succeeded"
+        }
+    )
+
+    $pipeline.environments += $prodStage
+
+    # Re-rank
+    for ($i = 0; $i -lt $pipeline.environments.Count; $i++) {
+        $pipeline.environments[$i].rank = $i + 1
+    }
+
+    # Update the pipeline definition
+    $updateUrl = "https://vsrm.dev.azure.com/$Org/$Project/_apis/release/definitions/${PipelineId}?api-version=$ApiVersion"
+    $jsonBody = $pipeline | ConvertTo-Json -Depth 20 -Compress
+
+    try {
+        Invoke-RestMethod -Uri $updateUrl -Headers $Headers -Method Put -Body $jsonBody
+        Write-Host "PROD stage created and updated in pipeline $PipelineId"
+    } catch {
+        Write-Host "ERROR updating pipeline ID: $PipelineId. $_"
+    }
+}
+
+foreach ($PipelineId in $PipelineIds) {
+    Add-ProdStage -PipelineId $PipelineId
+}

@@ -253,3 +253,38 @@ try {
 "@
     }
 }
+
+
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+# Update approvals - Simplified and enforced to one group
+foreach ($approvalType in @('preDeployApprovals', 'postDeployApprovals')) {
+    # Ensure the approval block exists
+    if ($null -eq $prodStage.$approvalType) {
+        $prodStage | Add-Member -MemberType NoteProperty -Name $approvalType -Value @{}
+    }
+
+    # Set exactly one approval group
+    $prodStage.$approvalType.approvals = @(
+        @{
+            rank = 1
+            isAutomated = ($approvalType -eq 'postDeployApprovals')  # true for post, false for pre
+            isNotificationOn = $true
+            approver = @{
+                id = $ApprovalGroupId
+                displayName = "PROD Approval Group"
+                isGroup = $true
+            }
+        }
+    )
+
+    # Set approval options
+    $prodStage.$approvalType.approvalOptions = @{
+        requiredApproverCount = 1
+        releaseCreatorCanBeApprover = $false
+        autoTriggeredAndPreviousEnvironmentApprovedCanBeSkipped = $false
+        enforceIdentityRevalidation = $false
+        timeoutInMinutes = 0
+        executionOrder = if ($approvalType -eq 'preDeployApprovals') { "beforeGates" } else { "afterSuccessfulGates" }
+    }
+}
+-------------------------------------------------------------------------------------------------------------------------------------

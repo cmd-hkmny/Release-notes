@@ -431,61 +431,43 @@ if ($failed) {
 -----------------------------------------------------------------------------------------
 
 $healthCheckTask = @{
-    taskId = "e213ff0f-5d5c-4791-802d-52ea3e7be1f1"  # PowerShell@2 task GUID
-    version = "2.*"
-    name = "HealthCheckAndRollback"
+    taskId = "c7a3c3e7-660d-4964-b650-b1be5f4e6f79"  # PowerShell on Remote Machine task GUID
+    version = "3.*"  # You may need to adjust based on your environment
+    name = "HealthCheckAndRollback_PROD"
     enabled = $true
     inputs = @{
-        targetType = "inline"
-        script = @"
-            \$servers = @("CHEAAPIDV03", "CHEAAPIDV04")
+        Machines = "CHEAAPIDV03,CHEAAPIDV04"
+        AdminUserName = "LEDGER\SVC-AUTODEPD01"
+        AdminPassword = "409598359eriogseu90weu9jiogseu90ehuierio"
+        protocol = "WinRM"
+        Target = "inline"
+        ScriptArguments = ""
+        Script = @"
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
             \$DeploymentRoot = "C:\Releases\PreproductionPreProdApi.SystemConfiguration"
             \$WebApplicationName = "MyWebApp"
 
-            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-
-            \$Username = "LEDGER\SVC-AUTODEPD01"
-            \$Password = ConvertTo-SecureString "409598359eriogseu90weu9jiogseu90ehuierio" -AsPlainText -Force
-            \$Credential = New-Object System.Management.Automation.PSCredential (\$Username, \$Password)
-
             \$failed = \$false
 
-            foreach (\$server in \$servers) {
-                try {
-                    Write-Host "Connecting to \$server for health check..."
+            \$url = "https://preprodapiredemptions.blemain.local/api/health"
 
-                    \$healthCheckResult = Invoke-Command -ComputerName \$server -Credential \$Credential -ScriptBlock {
-                        try {
-                            \$url = "https://preprodapiredemptions.blemain.local/api/health"
-                            \$resp = Invoke-WebRequest -Uri \$url -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
-                            if (\$resp.StatusCode -eq 200) {
-                                Write-Host "Health check passed on \$env:COMPUTERNAME"
-                                return \$true
-                            } else {
-                                Write-Host "Health check failed with status: \$([int]\$resp.StatusCode)"
-                                return \$false
-                            }
-                        } catch {
-                            Write-Host "Error checking health: \$($_.Exception.Message)"
-                            return \$false
-                        }
-                    }
-
-                    if (-not \$healthCheckResult) {
-                        Write-Host "Health check failed on \$server"
-                        \$failed = \$true
-                        break
-                    }
-                } catch {
-                    Write-Host "Could not connect to \$server: \$($_.Exception.Message)"
+            try {
+                Write-Host "Running health check on host: \$env:COMPUTERNAME"
+                \$resp = Invoke-WebRequest -Uri \$url -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
+                if (\$resp.StatusCode -eq 200) {
+                    Write-Host "Health check passed on \$env:COMPUTERNAME"
+                } else {
+                    Write-Host "Health check failed with status: \$([int]\$resp.StatusCode)"
                     \$failed = \$true
-                    break
                 }
+            } catch {
+                Write-Host "Health check error: \$($_.Exception.Message)"
+                \$failed = \$true
             }
 
             if (\$failed) {
-                Write-Host "Initiating rollback..."
+                Write-Host "Initiating rollback on \$env:COMPUTERNAME..."
 
                 \$folders = Get-ChildItem -Path \$DeploymentRoot -Directory |
                     Where-Object { \$_ -and \$_.Name -match '^\d+(\.\d+)*_\d{8}\.\d{6}$' } |
@@ -503,11 +485,12 @@ $healthCheckTask = @{
                 }
                 exit 1
             } else {
-                Write-Host "All health checks passed. Proceeding..."
+                Write-Host "All health checks passed on \$env:COMPUTERNAME"
                 exit 0
             }
 "@
     }
 }
+
 
 -----------------------------------------------------------------------------------------------------------

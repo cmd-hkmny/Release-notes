@@ -461,3 +461,15 @@ catch {
     }
 }
 ---------------------------------------------------------------
+foreach ($server in $servers) {
+    # First test basic connectivity
+    $connectionTest = Test-RemoteConnectivity -server $server -cred $cred
+    
+    if (-not $connectionTest) {
+        Write-Host "##vso[task.logissue type=error]Cannot proceed - failed to connect to $server"
+        $global:success = $false
+        continue
+    }
+    
+    # Only proceed with health check if connection test passed
+------------------------------------------------------------------

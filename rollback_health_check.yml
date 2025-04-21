@@ -563,3 +563,21 @@ try {
 -------------------------------------------------------------------------------
 d4c48ab2-58f6-4efb-8139-af3f3f6f3df0
 ---------------------------------------------
+
+- task: PowerShellOnTargetMachines@3
+  inputs:
+    Machines: 'CHEAAPIDV03,CHEAAPIDV04'
+    AdminUserName: '$(adminUsername)'
+    AdminPassword: '$(adminPassword)'
+    Target: 'InlineScript'
+    Protocol: 'Http'
+    InlineScript: |
+      Write-Host "Running health check on $env:COMPUTERNAME"
+      $url = "http://localhost/api/health"
+      $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
+      if ($resp.StatusCode -eq 200) {
+          Write-Host "Health check passed"
+      } else {
+          Write-Error "Health check failed with status: $($resp.StatusCode)"
+      }
+      ---------------------------------------

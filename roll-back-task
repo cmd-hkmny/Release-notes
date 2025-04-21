@@ -24,3 +24,45 @@ $healthCheckTask = [pscustomobject]@{
     }
 }
 $phase.workflowTasks += $healthCheckTask
+========================================================================================================================================
+$healthCheckTask = [pscustomobject]@{
+    taskId   = "2f1b7e86-cc74-4d9b-b3cf-f4c4f3c61b86"  # PowerShell@2
+    version  = "2.*"
+    name     = "HealthCheck_PROD"
+    enabled  = $true
+    inputs   = @{
+        targetType     = "inline"
+        script         = @'
+            $servers = @("CHEAAPIDV03", "CHEAAPIDV04")
+            $username = "LEDGER\\SVC-AUTODEPD01"
+            $password = ConvertTo-SecureString "409598359eriogseu90weu9jiogseu90ehuierio" -AsPlainText -Force
+            $creds = New-Object System.Management.Automation.PSCredential($username, $password)
+
+            foreach ($server in $servers) {
+                Write-Host "Running health check on $server"
+
+                try {
+                    Invoke-Command -ComputerName $server -Credential $creds -ScriptBlock {
+                        $url = "http://localhost/api/health"
+                        try {
+                            $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
+                            if ($resp.StatusCode -eq 200) {
+                                Write-Host "[$env:COMPUTERNAME] Health check passed"
+                            } else {
+                                Write-Error "[$env:COMPUTERNAME] Health check failed with status: $($resp.StatusCode)"
+                                exit 1
+                            }
+                        } catch {
+                            Write-Error "[$env:COMPUTERNAME] Error during health check: $($_.Exception.Message)"
+                            exit 1
+                        }
+                    }
+                } catch {
+                    Write-Error "Could not connect to $server: $($_.Exception.Message)"
+                    exit 1
+                }
+            }
+        '@
+    }
+}
+------------------------------------------------------------------------------------------------------

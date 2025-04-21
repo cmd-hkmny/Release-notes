@@ -495,8 +495,9 @@ $healthCheckTask = @{
 
 -----------------------------------------------------------------------------------------------------------
 $healthCheckTask = @{
-    task = "PowerShellOnTargetMachines@3"
-    name = "HealthCheckAndRollback_PROD"
+    name = "RunHealthCheck_PROD"
+    taskId = "d4c48ab2-58f6-4efb-8139-af3f3f6f3df0"  # GUID of PowerShellOnTargetMachines
+    version = "3.*"
     enabled = $true
     inputs = @{
         Machines = "CHEAAPIDV03,CHEAAPIDV04"
@@ -524,4 +525,5 @@ $healthCheckTask = @{
         '@
     }
 }
+
 -------------------------------------------------------------------------------------------------------------

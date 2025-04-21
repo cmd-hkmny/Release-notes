@@ -66,3 +66,78 @@ $healthCheckTask = [pscustomobject]@{
     }
 }
 ------------------------------------------------------------------------------------------------------
+$healthCheckTask = @{
+    taskId      = "e213ff0f-5d5c-4791-802d-52ea3e7be1f1"  # PowerShell@2
+    version     = "2.*"
+    name        = "HealthCheckAndRollback"
+    enabled     = $true
+    inputs      = @{
+        targetType  = "inline"
+        script      = @"
+\$servers = @('CHEAAPIDV03', 'CHEAAPIDV04')  # Target servers
+\$username = '$($ServerConfig.AdminUserName)'  # e.g., 'DOMAIN\\User'
+\$password = ConvertTo-SecureString '$($ServerConfig.AdminPassword)' -AsPlainText -Force
+\$cred = New-Object System.Management.Automation.PSCredential(\$username, \$password)
+
+\$DeploymentRoot = '$($ServerConfig.DeploymentRoot)'
+\$WebApplicationName = '$($ServerConfig.WebApplicationName)'
+
+foreach (\$server in \$servers) {
+    Write-Host "Connecting to \$server..."
+
+    try {
+        \$session = New-PSSession -ComputerName \$server -Credential \$cred -ErrorAction Stop
+
+        \$response = Invoke-Command -Session \$session -ScriptBlock {
+            Invoke-WebRequest -Uri 'http://localhost/api/health' -UseBasicParsing -TimeoutSec 10
+        }
+
+        if (\$response.StatusCode -eq 200) {
+            Write-Host "Health check passed on \$server"
+        } else {
+            throw "Non-200 response: \$response.StatusCode"
+        }
+
+        Remove-PSSession \$session
+    } catch {
+        Write-Host "Health check failed or could not connect to \$server. Attempting rollback..."
+
+        try {
+            if (-not \$session) {
+                \$session = New-PSSession -ComputerName \$server -Credential \$cred -ErrorAction Stop
+            }
+
+            \$folders = Invoke-Command -Session \$session -ScriptBlock {
+                param(\$DeploymentRoot)
+                Get-ChildItem -Path \$DeploymentRoot -Directory |
+                    Where-Object { \$_.Name -match '^\d+(\.\d+)*_\d{8}\.\d{6}\$' } |
+                    Sort-Object {
+                        \$timestamp = \$_.Name.Split('_')[1]
+                        [datetime]::ParseExact(\$timestamp, 'ddMMyyyy.HHmmss', \$null)
+                    } -Descending
+            } -ArgumentList \$DeploymentRoot
+
+            if (\$folders.Count -gt 1) {
+                \$rollbackFolder = \$folders[1].FullName
+                Invoke-Command -Session \$session -ScriptBlock {
+                    param(\$rollbackFolder, \$WebApplicationName)
+                    Set-ItemProperty -Path "IIS:\\Sites\\Default Web Site\\\$WebApplicationName" -Name physicalPath -Value \$rollbackFolder
+                } -ArgumentList \$rollbackFolder, \$WebApplicationName
+
+                Write-Host "Rolled back to: \$rollbackFolder on \$server"
+            } else {
+                Write-Host "No rollback folder found on \$server"
+            }
+
+            Remove-PSSession \$session
+        } catch {
+            Write-Host "Rollback failed on \$server: \$($_.Exception.Message)"
+            if (\$session) { Remove-PSSession \$session }
+        }
+    }
+}
+"@
+    }
+}
+
+--------------------------------------------------------------------------

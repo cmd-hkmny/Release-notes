@@ -1,3 +1,4 @@
+
 # Add health check task using PowerShellOnTargetMachines@3
 $healthCheckTask = [pscustomobject]@{
     taskId   = "fc5f5b8e-43f1-47dd-b891-74c4eac0a19f"  # taskId for PowerShellOnTargetMachines@3
@@ -473,3 +474,74 @@ foreach ($server in $servers) {
     
     # Only proceed with health check if connection test passed
 ------------------------------------------------------------------
+function Test-RemoteConnectivity {
+    param (
+        [string]$server,
+        [System.Management.Automation.PSCredential]$cred
+    )
+    
+    try {
+        Write-Host "`n=== Testing connection to $server ==="
+        
+        # Test basic WinRM connectivity first
+        $sessionParams = @{
+            ComputerName = $server
+            Credential = $cred
+            SessionOption = New-PSSessionOption -IdleTimeout 60000
+            ErrorAction = 'Stop'
+        }
+        
+        # Create session
+        $session = New-PSSession @sessionParams
+        Write-Host "[SUCCESS] Established PowerShell Remoting session to $server"
+        
+        try {
+            # Test basic command execution
+            $osInfo = Invoke-Command -Session $session -ScriptBlock {
+                [PSCustomObject]@{
+                    ComputerName = $env:COMPUTERNAME
+                    OSVersion = [System.Environment]::OSVersion.VersionString
+                    PSVersion = $PSVersionTable.PSVersion
+                    Time = Get-Date
+                    Disks = Get-Volume | Select-Object DriveLetter, SizeRemaining, Size
+                }
+            }
+            
+            Write-Host "`n[REMOTE SERVER DETAILS]"
+            Write-Host "Computer Name: $($osInfo.ComputerName)"
+            Write-Host "OS Version: $($osInfo.OSVersion)"
+            Write-Host "PowerShell Version: $($osInfo.PSVersion)"
+            Write-Host "Current Time: $($osInfo.Time)"
+            
+            Write-Host "`n[DISK INFORMATION]"
+            $osInfo.Disks | ForEach-Object {
+                $freeGB = [math]::Round($_.SizeRemaining/1GB, 2)
+                $totalGB = [math]::Round($_.Size/1GB, 2)
+                Write-Host "Drive $($_.DriveLetter): $freeGB GB free of $totalGB GB"
+            }
+            
+            # List top 5 processes by memory usage
+            $processes = Invoke-Command -Session $session -ScriptBlock {
+                Get-Process | Sort-Object WS -Descending | Select-Object -First 5 | 
+                Select-Object ProcessName, Id, WS, CPU
+            }
+            
+            Write-Host "`n[TOP PROCESSES BY MEMORY]"
+            $processes | ForEach-Object {
+                $memMB = [math]::Round($_.WS/1MB, 2)
+                Write-Host "$($_.ProcessName) (PID $($_.Id)): $memMB MB"
+            }
+            
+            return $true
+        }
+        finally {
+            if ($session) { Remove-PSSession $session -ErrorAction SilentlyContinue }
+        }
+    }
+    catch {
+        Write-Host "[ERROR] Failed to connect to $server"
+        Write-Host "Details: $($_.Exception.Message)"
+        return $false
+    }
+}
+--------------------------------------------------------

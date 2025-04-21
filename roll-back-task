@@ -1,0 +1,26 @@
+# Add health check task using PowerShellOnTargetMachines@3
+$healthCheckTask = [pscustomobject]@{
+    taskId   = "fc5f5b8e-43f1-47dd-b891-74c4eac0a19f"  # taskId for PowerShellOnTargetMachines@3
+    version  = "3.*"
+    name     = "HealthCheck_PROD"
+    enabled  = $true
+    inputs   = @{
+        Machines        = "CHEAAPIDV03,CHEAAPIDV04"
+        AdminUserName   = "$(adminUsername)"
+        AdminPassword   = "$(adminPassword)"
+        Target          = "InlineScript"
+        Protocol        = "Http"
+        ScriptArguments = ""
+        InlineScript    = @'
+          Write-Host "Running health check on $env:COMPUTERNAME"
+          $url = "http://localhost/api/health"
+          $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
+          if ($resp.StatusCode -eq 200) {
+              Write-Host "Health check passed"
+          } else {
+              Write-Error "Health check failed with status: $($resp.StatusCode)"
+          }
+        '@
+    }
+}
+$phase.workflowTasks += $healthCheckTask

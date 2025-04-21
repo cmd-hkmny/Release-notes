@@ -430,74 +430,84 @@ if ($failed) {
 }
 -----------------------------------------------------------------------------------------
 
-$servers = @("CHEAAPIDV03", "CHEAAPIDV04")
+$healthCheckTask = @{
+    taskId = "e213ff0f-5d5c-4791-802d-52ea3e7be1f1"  # PowerShell@2 task GUID
+    version = "2.*"
+    name = "HealthCheckAndRollback"
+    enabled = $true
+    inputs = @{
+        targetType = "inline"
+        script = @"
+            \$servers = @("CHEAAPIDV03", "CHEAAPIDV04")
 
-$DeploymentRoot = "C:\Releases\PreproductionPreProdApi.SystemConfiguration"
-$WebApplicationName = "MyWebApp"  # Update this as needed
+            \$DeploymentRoot = "C:\Releases\PreproductionPreProdApi.SystemConfiguration"
+            \$WebApplicationName = "MyWebApp"
 
-# Credentials
-$Username = "LEDGER\SVC-AUTODEPD01"
-$Password = ConvertTo-SecureString "409598359eriogseu90weu9jiogseu90ehuierio" -AsPlainText -Force
-$Credential = New-Object System.Management.Automation.PSCredential ($Username, $Password)
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-# Force TLS 1.2
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            \$Username = "LEDGER\SVC-AUTODEPD01"
+            \$Password = ConvertTo-SecureString "409598359eriogseu90weu9jiogseu90ehuierio" -AsPlainText -Force
+            \$Credential = New-Object System.Management.Automation.PSCredential (\$Username, \$Password)
 
-$failed = $false
+            \$failed = \$false
 
-foreach ($server in $servers) {
-    try {
-        Write-Host "Connecting to $server for health check..."
+            foreach (\$server in \$servers) {
+                try {
+                    Write-Host "Connecting to \$server for health check..."
 
-        $healthCheckResult = Invoke-Command -ComputerName $server -Credential $Credential -ScriptBlock {
-            try {
-                $url = "https://preprodapiredemptions.blemain.local/api/health"
-                $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
-                if ($resp.StatusCode -eq 200) {
-                    Write-Host "Health check passed on $env:COMPUTERNAME"
-                    return $true
-                } else {
-                    Write-Host "Health check failed with status: $($resp.StatusCode)"
-                    return $false
+                    \$healthCheckResult = Invoke-Command -ComputerName \$server -Credential \$Credential -ScriptBlock {
+                        try {
+                            \$url = "https://preprodapiredemptions.blemain.local/api/health"
+                            \$resp = Invoke-WebRequest -Uri \$url -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
+                            if (\$resp.StatusCode -eq 200) {
+                                Write-Host "Health check passed on \$env:COMPUTERNAME"
+                                return \$true
+                            } else {
+                                Write-Host "Health check failed with status: \$([int]\$resp.StatusCode)"
+                                return \$false
+                            }
+                        } catch {
+                            Write-Host "Error checking health: \$($_.Exception.Message)"
+                            return \$false
+                        }
+                    }
+
+                    if (-not \$healthCheckResult) {
+                        Write-Host "Health check failed on \$server"
+                        \$failed = \$true
+                        break
+                    }
+                } catch {
+                    Write-Host "Could not connect to \$server: \$($_.Exception.Message)"
+                    \$failed = \$true
+                    break
                 }
-            } catch {
-                Write-Host "Error checking health: $($_.Exception.Message)"
-                return $false
             }
-        }
 
-        if (-not $healthCheckResult) {
-            Write-Host "Health check failed on $server"
-            $failed = $true
-            break
-        }
-    } catch {
-        Write-Host "Could not connect to $server: $($_.Exception.Message)"
-        $failed = $true
-        break
+            if (\$failed) {
+                Write-Host "Initiating rollback..."
+
+                \$folders = Get-ChildItem -Path \$DeploymentRoot -Directory |
+                    Where-Object { \$_ -and \$_.Name -match '^\d+(\.\d+)*_\d{8}\.\d{6}$' } |
+                    Sort-Object {
+                        \$timestamp = \$_.Name.Split('_')[1]
+                        [datetime]::ParseExact(\$timestamp, 'ddMMyyyy.HHmmss', \$null)
+                    } -Descending
+
+                if (\$folders.Count -gt 1) {
+                    \$rollbackFolder = \$folders[1].FullName
+                    Set-ItemProperty -Path "IIS:\Sites\${WebApplicationName}" -Name physicalPath -Value \$rollbackFolder
+                    Write-Host "Rolled back to: \$rollbackFolder"
+                } else {
+                    Write-Host "No rollback folder found."
+                }
+                exit 1
+            } else {
+                Write-Host "All health checks passed. Proceeding..."
+                exit 0
+            }
+"@
     }
 }
 
-if ($failed) {
-    Write-Host "Initiating rollback..."
-
-    $folders = Get-ChildItem -Path $DeploymentRoot -Directory |
-        Where-Object { $_.Name -match '^\d+(\.\d+)*_\d{8}\.\d{6}$' } |
-        Sort-Object {
-            $timestamp = $_.Name.Split('_')[1]
-            [datetime]::ParseExact($timestamp, 'ddMMyyyy.HHmmss', $null)
-        } -Descending
-
-    if ($folders.Count -gt 1) {
-        $rollbackFolder = $folders[1].FullName
-        Set-ItemProperty -Path "IIS:\Sites\${WebApplicationName}" -Name physicalPath -Value $rollbackFolder
-        Write-Host "Rolled back to: $rollbackFolder"
-    } else {
-        Write-Host "No rollback folder found."
-    }
-    exit 1
-} else {
-    Write-Host "All health checks passed. Proceeding..."
-    exit 0
-}
 -----------------------------------------------------------------------------------------------------------

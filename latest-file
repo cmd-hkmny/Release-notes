@@ -148,27 +148,39 @@ $healthCheckTask = @{
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 # Configuration
-$servers = @("CHEAAPIDV03", "CHEAAPIDV04")
-$DeploymentRoot = "$(DeploymentRoot)"
-$WebApplicationName = "$(WebApplicationName)"
-$healthCheckUrl = "$(HealthCheckUrl)"  # Get from pipeline variables
+$configFile = "$(ConfigFilePath)"  # Path to JSON config file passed as pipeline variable
 $timeoutSeconds = 15
 $idleTimeoutMs = 60000  # 60 seconds in milliseconds
 
 # Initialize counters
-$global:success = $true
-$global:rollbackAttempted = $false
+$global:overallSuccess = $true
+$global:anyRollbackAttempted = $false
+
+# Load configuration from JSON file
+try {
+    $config = Get-Content -Path $configFile -Raw | ConvertFrom-Json
+    Write-Host "Loaded configuration for $($config.applications.Count) applications"
+    
+    # Validate configuration
+    if (-not $config.applications -or $config.applications.Count -eq 0) {
+        throw "No applications configured in JSON file"
+    }
+}
+catch {
+    Write-Host "##vso[task.logissue type=error]Failed to load configuration: $($_.Exception.Message)"
+    exit 1
+}
 
 function Invoke-HealthCheck {
     param (
         [string]$server,
+        [string]$healthCheckUrl,
         [System.Management.Automation.PSCredential]$cred
     )
     
     try {
-        Write-Host "`n=== Health Check on $server ==="
+        Write-Host "`n=== Health Check on $server ($healthCheckUrl) ==="
         
-        # Create remote session with 60-second idle timeout
         $sessionParams = @{
             ComputerName = $server
             Credential = $cred
@@ -178,19 +190,14 @@ function Invoke-HealthCheck {
         $session = New-PSSession @sessionParams
         
         try {
-            # Test basic connectivity first
             $null = Invoke-Command -Session $session -ScriptBlock { $true } -ErrorAction Stop
             
-            # Perform health check
             $response = Invoke-Command -Session $session -ScriptBlock {
                 param($url, $timeout)
                 try {
-                    $result = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec $timeout
-                    @{
-                        StatusCode = $result.StatusCode
-                        StatusDescription = $result.StatusDescription
-                    }
-                } catch {
+                    Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec $timeout
+                }
+                catch {
                     @{
                         StatusCode = 500
                         StatusDescription = $_.Exception.Message
@@ -201,7 +208,8 @@ function Invoke-HealthCheck {
             if ($response.StatusCode -eq 200) {
                 Write-Host "[SUCCESS] Health check passed on $server"
                 return $true
-            } else {
+            }
+            else {
                 Write-Host "[FAILURE] Health check failed on $server (Status: $($response.StatusCode))"
                 Write-Host "Response: $($response.StatusDescription)"
                 return $false
@@ -226,11 +234,15 @@ function Invoke-HealthCheck {
 function Invoke-Rollback {
     param (
         [string]$server,
+        [string]$deploymentRoot,
+        [string]$webApplicationName,
         [System.Management.Automation.PSCredential]$cred
     )
     
     try {
         Write-Host "`n=== Attempting Rollback on $server ==="
+        Write-Host "Application: $webApplicationName"
+        Write-Host "Deployment Root: $deploymentRoot"
         
         $sessionParams = @{
             ComputerName = $server
@@ -243,19 +255,19 @@ function Invoke-Rollback {
         try {
             # Verify deployment root exists
             $deploymentRootExists = Invoke-Command -Session $session -ScriptBlock {
-                param($DeploymentRoot)
-                Test-Path $DeploymentRoot
-            } -ArgumentList $DeploymentRoot
+                param($deploymentRoot)
+                Test-Path $deploymentRoot
+            } -ArgumentList $deploymentRoot
 
             if (-not $deploymentRootExists) {
-                Write-Host "[ERROR] Deployment root path does not exist: $DeploymentRoot"
+                Write-Host "[ERROR] Deployment root path does not exist: $deploymentRoot"
                 return $false
             }
 
             # Get available deployment folders
             $folders = Invoke-Command -Session $session -ScriptBlock {
-                param($DeploymentRoot)
-                Get-ChildItem -Path $DeploymentRoot -Directory |
+                param($deploymentRoot)
+                Get-ChildItem -Path $deploymentRoot -Directory |
                     Where-Object { $_.Name -match "^\d+(\.\d+)*_\d{8}\.\d{6}$" } |
                     Sort-Object {
                         $timestamp = $_.Name.Split("_")[1]
@@ -268,7 +280,8 @@ function Invoke-Rollback {
                 
                 # Perform the rollback
                 $rollbackResult = Invoke-Command -Session $session -ScriptBlock {
-                    param($rollbackFolder, $WebApplicationName)
+                    param($rollbackFolder, $webApplicationName)
+                    
                     try {
                         # Load IIS module if needed
                         if (-not (Get-Module -Name WebAdministration -ErrorAction SilentlyContinue)) {
@@ -280,7 +293,11 @@ function Invoke-Rollback {
                             New-PSDrive -Name IIS -PSProvider WebAdministration -Root 'MACHINE/WEBROOT/APPHOST' -ErrorAction Stop | Out-Null
                         }
                         
-                        $sitePath = "IIS:\Sites\Default Web Site\$WebApplicationName"
+                        $sitePath = "IIS:\Sites\Default Web Site\$webApplicationName"
+                        if (-not (Test-Path $sitePath)) {
+                            throw "IIS application path does not exist: $sitePath"
+                        }
+                        
                         $currentPath = (Get-ItemProperty -Path $sitePath).physicalPath
                         
                         if ($currentPath -ne $rollbackFolder) {
@@ -290,19 +307,22 @@ function Invoke-Rollback {
                             Write-Host "to:"
                             Write-Host "$rollbackFolder"
                             return $true
-                        } else {
+                        }
+                        else {
                             Write-Host "Already pointing to rollback folder. No change needed."
                             return $false
                         }
-                    } catch {
+                    }
+                    catch {
                         Write-Host "Rollback failed: $($_.Exception.Message)"
                         return $false
                     }
-                } -ArgumentList $rollbackFolder, $WebApplicationName
+                } -ArgumentList $rollbackFolder, $webApplicationName
                 
                 return $rollbackResult
-            } else {
-                Write-Host "[ERROR] No suitable rollback folder found in $DeploymentRoot"
+            }
+            else {
+                Write-Host "[ERROR] No suitable rollback folder found in $deploymentRoot"
                 return $false
             }
         }
@@ -332,27 +352,71 @@ try {
     Write-Host "Using service account: $(AdminUserName)"
     Write-Host "##vso[task.setvariable variable=AdminPassword]null"
     
-    # Perform health checks
-    foreach ($server in $servers) {
-        $healthStatus = Invoke-HealthCheck -server $server -cred $cred
-        if (-not $healthStatus) {
-            $global:success = $false
-            $rollbackResult = Invoke-Rollback -server $server -cred $cred
-            if ($rollbackResult) {
-                $global:rollbackAttempted = $true
+    # Process each application
+    foreach ($app in $config.applications) {
+        Write-Host "`nProcessing application: $($app.name)"
+        
+        $appSuccess = $true
+        $appRollbackAttempted = $false
+        
+        # Validate required properties
+        $requiredProps = @('servers', 'deploymentRoot', 'webApplicationName', 'healthCheckUrl')
+        foreach ($prop in $requiredProps) {
+            if (-not $app.$prop) {
+                Write-Host "##vso[task.logissue type=error]Application $($app.name) missing required property: $prop"
+                $appSuccess = $false
+                continue
             }
         }
+        
+        if (-not $appSuccess) { 
+            $global:overallSuccess = $false
+            continue 
+        }
+        
+        # Process each server
+        foreach ($server in $app.servers) {
+            Write-Host "`n=== Processing server: $server ==="
+            
+            $healthStatus = Invoke-HealthCheck -server $server -healthCheckUrl $app.healthCheckUrl -cred $cred
+            
+            if (-not $healthStatus) {
+                $appSuccess = $false
+                $rollbackResult = Invoke-Rollback -server $server -deploymentRoot $app.deploymentRoot `
+                    -webApplicationName $app.webApplicationName -cred $cred
+                
+                if ($rollbackResult) {
+                    $appRollbackAttempted = $true
+                    $global:anyRollbackAttempted = $true
+                }
+            }
+        }
+        
+        # Application summary
+        if ($appSuccess) {
+            Write-Host "`n[APPLICATION RESULT] $($app.name) - All health checks passed"
+        }
+        elseif ($appRollbackAttempted) {
+            Write-Host "`n[APPLICATION RESULT] $($app.name) - Health checks failed but rollback was attempted"
+        }
+        else {
+            Write-Host "`n[APPLICATION RESULT] $($app.name) - Health checks failed and rollback could not be completed"
+        }
+        
+        if (-not $appSuccess) { $global:overallSuccess = $false }
     }
     
     # Final status
-    if ($global:success) {
-        Write-Host "`n[RESULT] All health checks passed successfully"
+    if ($global:overallSuccess) {
+        Write-Host "`n[FINAL RESULT] All applications healthy"
         exit 0
-    } elseif ($global:rollbackAttempted) {
-        Write-Host "`n[RESULT] Health checks failed but rollback was attempted"
+    }
+    elseif ($global:anyRollbackAttempted) {
+        Write-Host "`n[FINAL RESULT] Some applications failed but rollbacks were attempted"
         exit 1
-    } else {
-        Write-Host "`n[RESULT] Health checks failed and rollback could not be completed"
+    }
+    else {
+        Write-Host "`n[FINAL RESULT] Applications failed and rollbacks could not be completed"
         exit 1
     }
 }

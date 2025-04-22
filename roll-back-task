@@ -545,3 +545,18 @@ function Test-RemoteConnectivity {
     }
 }
 --------------------------------------------------------
+# Import IIS module if not already loaded
+                        if (-not (Get-Module -Name WebAdministration -ErrorAction SilentlyContinue)) {
+                            Import-Module WebAdministration
+                        }
+                        
+                        # Verify IIS drive exists
+                        if (-not (Test-Path 'IIS:\')) {
+                            New-PSDrive -Name IIS -PSProvider WebAdministration -Root 'MACHINE/WEBROOT/APPHOST' -ErrorAction Stop | Out-Null
+                        }
+                        
+                        $sitePath = "IIS:\Sites\Default Web Site\$WebApplicationName"
+                        if (-not (Test-Path $sitePath)) {
+                            throw "IIS application path does not exist: $sitePath"
+                        }
+-------------------------------------------------------------------------------------------

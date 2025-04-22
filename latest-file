@@ -366,3 +366,8 @@ catch {
     }
 }
 -----------------------------------------------------------------------------------------------------------------
+
+# Configuration - Handle relative paths properly
+$configPath = Join-Path -Path $env:SYSTEM_DEFAULTWORKINGDIRECTORY -ChildPath "appConfig.json"
+Write-Host "Looking for config file at: $configPath"
+--------------------------------------------------------------

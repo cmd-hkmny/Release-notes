@@ -1,0 +1,433 @@
+📄 Design Document
+Title: Automation of PROD Stage Deployment with Health Check and Rollback in Azure DevOps
+
+📌 1. Objective
+Automate the creation of a PROD stage in Azure DevOps release pipelines, integrating a PowerShell-based health check task executed on target servers. If the health check fails post-deployment, the system initiates an automatic rollback to the previous deployment version.
+
+🧩 2. Components & Tools
+
+Component	Description
+Azure DevOps (ADO)	CI/CD platform used for managing pipelines
+PowerShell	Used for scripting deployment logic and health checks
+Target Servers	CHEAAPIDV03, CHEAAPIDV04 (IIS Web Servers)
+ADO REST API	Used for dynamic pipeline/task/stage creation
+ADO Environment	PROD stage configured with approvals
+Secure Files & Variables	Stores admin credentials securely
+🛠️ 3. Architecture Overview
+less
+Copy
+Edit
+ADO Release Pipeline
+ └── PROD Stage (Generated via Script)
+     ├── IIS Deployment (Custom Tasks)
+     └── HealthCheckAndRollback (PowerShell@2)
+          └── PSSession to Target Servers
+              ├── Health Endpoint Check
+              └── Rollback on Failure
+🧪 4. Health Check & Rollback Logic
+Health Check Flow:
+
+Runs after deployment using Invoke-WebRequest to http://localhost/api/health on each server.
+
+Checks HTTP status code (200 = pass).
+
+If status ≠ 200 or error occurs:
+
+Logs failure.
+
+Initiates rollback.
+
+Rollback Logic:
+
+Enumerates historical deployments from $DeploymentRoot.
+
+Parses timestamped folder names.
+
+Picks second latest folder (latest = current).
+
+Updates IIS site’s physical path to previous deployment.
+
+Logs rollback status per server.
+
+🔐 5. Authentication & Access
+Admin Credentials securely passed via $(adminUsername) / $(adminPassword) pipeline variables.
+
+Credentials are used in New-PSSession to connect via WinRM.
+
+SecureString and PSCredential objects are created inline.
+
+⚙️ 6. Script Highlights
+powershell
+Copy
+Edit
+$servers = @('CHEAAPIDV03', 'CHEAAPIDV04')
+$username = '$($ServerConfig.AdminUserName)'
+$password = ConvertTo-SecureString '$($ServerConfig.AdminPassword)' -AsPlainText -Force
+$cred = New-Object System.Management.Automation.PSCredential($username, $password)
+
+foreach ($server in $servers) {
+    try {
+        $session = New-PSSession -ComputerName $server -Credential $cred
+        $response = Invoke-Command -Session $session -ScriptBlock {
+            Invoke-WebRequest -Uri 'http://localhost/api/health'
+        }
+        # Health check logic ...
+    } catch {
+        # Rollback logic ...
+    }
+}
+📦 7. Deployment Automation Summary
+
+Task	Method
+Stage Creation	PowerShell with Release Definitions API
+Task Injection	JSON-formatted PowerShell@2 task added to deploy phase
+Remote Execution	Invoke-Command over New-PSSession
+Error Handling	Try/Catch blocks with recovery paths
+Cleanup	Remove-PSSession post execution
+🚨 8. Error Handling
+Handles unreachable servers, failed HTTP requests, and rollback exceptions.
+
+Fallback logic ensures sessions are disposed and errors logged per server.
+
+✅ 9. Future Enhancements
+Integrate logging to Azure Monitor or Application Insights.
+
+Add Slack/MS Teams notification for rollback events.
+
+Support for dynamic server list via environment tags or service connections.
+
+-------------------------------------------------------------------------------------------------
+  Design Document: Automated PROD Stage Creation with Health Checks, Rollback, and Release Notes
+1. Introduction
+1.1 Purpose
+This document outlines the design for automating the creation of a PROD stage in Azure DevOps Release Pipelines, including:
+
+Health Check & Rollback task implementation
+
+Release Notes Generation integration
+
+Observability enhancements
+
+1.2 Scope
+Automate PROD stage creation by cloning the Pre-PROD stage
+
+Add a Health Check & Rollback PowerShell task
+
+Generate release notes for deployments
+
+Ensure observability (logging, metrics, tracing)
+
+2. Architecture
+2.1 High-Level Workflow
+Diagram
+Code
+
+
+
+
+
+2.2 Components
+Component	Description
+Azure DevOps REST API	Creates/modifies release pipelines
+PowerShell Script	Health checks, rollback, and release notes
+JSON Config (appConfig.json)	Defines apps, servers, health check URLs
+Logging System	Azure Monitor/Application Insights
+3. Detailed Design
+3.1 PROD Stage Automation
+3.1.1 Stage Creation
+Input: Pre-PROD stage definition
+
+Process:
+
+powershell
+# Clone Pre-PROD stage
+$prodStage = $pipeline.environments | Where-Object { $_.name -eq 'pre-prod' } | 
+             ConvertTo-Json -Depth 20 | ConvertFrom-Json
+$prodStage.name = "prod"
+Output: New PROD stage with identical tasks.
+
+3.1.2 Health Check Task
+Script: Validates app health before deployment.
+
+powershell
+$healthCheckTask = @{
+    taskId = "e213ff0f-5d5c-4791-802d-52ea3e7be1f1" # PowerShell task
+    inputs = @{
+        script = "Invoke-WebRequest -Uri 'http://localhost/api/health'"
+    }
+}
+3.1.3 Rollback Logic
+Trigger: Health check failure (non-200 status)
+
+Action: Revert to last known good deployment.
+
+powershell
+Set-ItemProperty -Path "IIS:\Sites\Default Web Site\$WebApplicationName" `
+                 -Name physicalPath -Value $rollbackFolder
+3.2 Release Notes Generation
+3.2.1 Integration
+Trigger: Post-deployment to PROD
+
+Method: PowerShell script calling Azure DevOps API:
+
+powershell
+$releaseNotes = Invoke-RestMethod -Uri "$($env:SYSTEM_TEAMFOUNDATIONCOLLECTIONURI)/_apis/release/releases/$($env:RELEASE_RELEASEID)?api-version=7.0"
+3.2.2 Output Format
+markdown
+## Release Notes for v1.2.3
+- **Deployed**: 2023-08-20  
+- **Changes**:  
+  - [ABC-123] Fixed health check timeout  
+  - [DEF-456] Added rollback logging  
+3.3 Observability Enhancements
+3.3.1 Logging
+Structured Logs:
+
+powershell
+Write-Host "##vso[task.logissue type=error]Rollback initiated for $webApplicationName"
+Azure Monitor Integration:
+
+powershell
+Write-Host "##vso[telemetry.publish operation_name=Rollback metrics={\"duration_ms\":$duration}]"
+3.3.2 Metrics Tracked
+Metric	Description	Alert Threshold
+deployment_success_rate	% of successful deployments	<95%
+rollback_count	Number of rollbacks/hour	>3
+health_check_latency	API response time	>2s
+4. Configuration
+4.1 JSON Config (appConfig.json)
+json
+{
+  "applications": [
+    {
+      "name": "SystemConfiguration",
+      "servers": ["CHEAAPIDV03", "CHEAAPIDV04"],
+      "deploymentRoot": "C:\\Releases\\Prod\\SystemConfiguration",
+      "webApplicationName": "SystemConfiguration",
+      "healthCheckUrl": "http://localhost/api/health"
+    }
+  ]
+}
+4.2 Pipeline Variables
+Variable	Purpose	Example
+ConfigPath	Path to appConfig.json	$(Build.SourcesDirectory)\appConfig.json
+AdminUserName	Service account	LEDGER\SVC-AUTODEPD01
+AdminPassword	Service password (secret)	-
+5. Failure Handling
+5.1 Rollback Scenarios
+Scenario	Action
+Health check fails	Revert to last good deployment
+IIS path missing	Log error, skip rollback
+Invalid JSON config	Fail pipeline
+5.2 Notifications
+Azure DevOps Alerts: Email team on rollback
+
+Teams/Slack: Post release notes automatically
+
+6. Security
+Secret Management:
+
+Store AdminPassword in Azure Key Vault
+
+Mask secrets in logs:
+
+powershell
+Write-Host "##vso[task.setvariable variable=AdminPassword]null"
+Role-Based Access: Restrict PROD stage modifications.
+
+7. Appendix
+7.1 Sample Scripts
+Health Check & Rollback PowerShell Script (Attach full script)
+
+Release Notes Generator
+
+7.2 References
+Azure DevOps REST API Docs
+
+PowerShell Logging Commands
+-------------------------------------------------------------------------------------------------------
+  Design Document: Automating PROD Stage Creation and Enhancements in Azure DevOps Pipeline
+1. Introduction
+
+This document details the design for automating the creation of the Production (PROD) stage within our Azure DevOps pipeline, and integrating new tasks to enhance deployment reliability and communication: Health Checks, Automated Rollback, and Release Notes Generation.
+
+2. Goals
+
+Automate PROD Stage Creation: Eliminate manual configuration and reduce the risk of errors.
+
+Implement Automated Health Checks: Ensure application stability and prevent faulty deployments from impacting users.
+
+Implement Automated Rollback Mechanism: Minimize downtime by automatically reverting to a stable state upon deployment failure.
+
+Automate Release Notes Generation: Improve transparency and communication by providing stakeholders with clear, consistent release notes.
+
+3. Scope
+
+This design encompasses the following Azure DevOps pipeline modifications:
+
+Dynamic creation of the PROD stage, contingent on successful pre-production deployments.
+
+Integration of Health Check tasks within the PROD stage.
+
+Implementation of an Automated Rollback mechanism within the PROD stage.
+
+Integration of the Release Notes Generation script.
+
+4. High-Level Design
+
+The Azure DevOps pipeline will be modified to automate the PROD stage and integrate key tasks:
+
+
+
+blog.rufer.be
+5. Detailed Design
+
+5.1. Automated PROD Stage Creation
+
+Trigger: Upon successful completion of the pre-production deployment and manual approval.
+
+Implementation:
+
+Utilize YAML pipeline definitions for conditional stage creation.
+
+The PROD stage will include a dependsOn clause, referencing the pre-production stage and approval.
+
+The PROD stage will use a condition to verify the success of the preceding stage(s).
+
+Alternatively, a PowerShell task could use the Azure DevOps API, but YAML is preferred for clarity.
+
+Details:
+
+The pipeline definition will be parameterized to allow for different pre-prod stages.
+
+Error handling will be implemented to catch any issues during dynamic stage creation.
+
+5.2. Automated Health Checks
+
+Purpose: To validate the application's health and functionality immediately following PROD deployment.
+
+Implementation:
+
+A dedicated task will be inserted as the initial step in the PROD deployment job.
+
+Technology: PowerShell or Bash scripts using curl, Invoke-WebRequest, or application-specific health endpoints.
+
+Checks:
+
+HTTP status codes for key URLs.
+
+Connectivity to backend services.
+
+Verification of critical application components.
+
+Failure: Task failure will trigger the automated rollback process.
+
+Details:
+
+Health check endpoints will be configurable.
+
+Timeout values will be set for each check.
+
+Logging will capture detailed health check results.
+
+5.3. Automated Rollback Mechanism
+
+Purpose: To automatically revert to the last known stable state in PROD upon deployment or health check failure.
+
+Implementation:
+
+A "Rollback" job will be added to the PROD stage.
+
+Trigger: The job will execute on a condition: failed() status from the deployment or health check job.
+
+Strategy:
+
+Blue/Green: Switch traffic back to the previous active environment.
+
+Canary: Roll back traffic from the newly deployed canary.
+
+In-Place: Re-deploy the last successful artifact.
+
+Tasks: The rollback job will contain tasks to execute the rollback, using Azure CLI, PowerShell, or deployment-tool-specific commands.
+
+Details
+* The rollback strategy will be configurable.
+* Appropriate logging and notifications will be implemented.
+* The rollback process will be designed to minimize data loss.
+
+5.4. Automated Release Notes Generation
+
+Purpose: To automatically generate release notes, summarizing changes included in the PROD deployment.
+
+Implementation:
+
+Integrate the existing PowerShell script as a task in the PROD stage, post-health checks.
+
+Input: Git logs (based on tags) and Azure DevOps Work Items linked to Pull Requests.
+
+Output:
+
+Markdown artifact.
+
+(Optional) Wiki publication or email notification.
+
+Hierarchical formatting of work items (Epic -> Feature -> PBI -> Task).
+
+Details
+* The script will be integrated into the pipeline using a PowerShell task.
+* The generated release notes will be stored as a pipeline artifact.
+* A pipeline variable will control publishing to the Wiki.
+
+6. Security Considerations
+
+Service Principal/Managed Identity: Use for secure interaction with Azure resources and Azure DevOps.
+
+Azure Key Vault: Store sensitive information (connection strings, API keys).
+
+Approval Gates: Retain manual approval for PROD deployments.
+
+Principle of Least Privilege: Ensure that the pipeline and its tasks have the minimum necessary permissions.
+
+7. Rollout Plan
+
+Development & Testing: Implement and thoroughly test in a non-PROD environment.
+
+Pilot Deployment: Deploy to a subset of PROD or a non-critical PROD service.
+
+Full PROD Rollout: Deploy to the entire PROD environment after successful pilot.
+
+Monitoring & Optimization: Continuously monitor pipeline execution and PROD environment health.
+
+8. Success Metrics
+
+Successful automation of PROD stage creation.
+
+Successful execution of automated health checks.
+
+Successful automated rollback in case of failure.
+
+Consistent generation of accurate release notes.
+
+Reduced PROD deployment time.
+
+Improved PROD deployment reliability.
+
+9. Team Roles and Responsibilities
+
+DevOps Engineers: Pipeline design, implementation, and maintenance.
+
+Development Teams: Work item linking and health check endpoint development.
+
+Operations Teams: Rollback strategy and infrastructure.
+
+Security Team: Security review and approval.
+
+10. Future Considerations
+
+Integration with incident management.
+
+Advanced health checks (performance, load).
+
+More granular rollback strategies.
+
+Release notes customization.

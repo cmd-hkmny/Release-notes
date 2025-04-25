@@ -1,0 +1,361 @@
+# Detailed Design Document for Scaling DevOps Automation POCs
+
+## 1. POC Description
+
+### 1.1 Automated Release Notes Creation
+This POC automates the generation of release notes during the Azure DevOps release process. It collects work items and changesets associated with a release, formats them into a readable markdown or HTML format, and publishes them as part of the release artifacts.
+
+**Key Features:**
+- Retrieves linked work items and commits
+- Formats information using templates
+- Publishes notes to release artifacts or sends via email
+
+### 1.2 Automated PROD Stage Creation with Health Checks and Rollbacks
+This POC automates the addition of a standardized PROD stage to classic Azure DevOps release pipelines. It includes post-deployment health checks and a rollback mechanism.
+
+**Key Features:**
+- Clones and modifies pre-existing stage to create a standardized PROD stage
+- Inserts PowerShell-based health check tasks
+- Enables automatic rollback on failed health checks
+- Uses a config file (JSON/CSV) for dynamic values
+
+---
+
+## 2. Scaling the POCs to 100+ Applications
+
+To apply this solution across 100+ applications:
+
+### 2.1 Centralized Configuration
+- Use centralized configuration files (e.g., JSON/CSV) stored in a Git repo for each app
+- Each config includes pipeline ID, web app name, server paths, approval groups
+
+### 2.2 Parameterized Templates
+- Convert YAML and PowerShell into reusable templates with parameters
+- Trigger templates via pipeline variables or UI inputs
+
+### 2.3 Batch Execution
+- Create a meta-pipeline that loops through applications using their config
+- Run `release-notes.ps1` and `create-prod-stage.ps1` for each entry
+
+### 2.4 Governance and Auditing
+- Include logging and versioning of changes per app
+- Track rollout status in a dashboard (e.g., Power BI, Excel log)
+
+---
+
+## 3. Architecture Summary
+
+**Components:**
+- Azure DevOps Pipelines (YAML)
+- PowerShell scripts
+- Azure DevOps Classic Release Pipelines
+- Config repository (JSON/CSV)
+
+**Flow:**
+1. DevOps pipeline reads config
+2. Calls PowerShell script to modify release definition
+3. Adds PROD stage with health check + rollback
+4. For release notes, pipeline triggers post-release, collects metadata, and publishes notes
+
+```
++--------------------+          +-------------------+
+|   YAML Pipeline    | -------> | PowerShell Script |
++--------------------+          +-------------------+
+        |                                 |
+        v                                 v
++--------------------+         +-----------------------------+
+| Config File (Git)  |<------->| Azure DevOps Release Defs   |
++--------------------+         +-----------------------------+
+```
+
+---
+
+## 4. Conceptual Data Model (if applicable)
+
+### Config Model
+```json
+{
+  "PipelineId": 123,
+  "WebApplicationName": "App1",
+  "DeploymentRoot": "D:\\Deployments",
+  "Machines": ["Server1", "Server2"],
+  "ApprovalGroupId": "GUID"
+}
+```
+Used by both automation tasks to customize behavior per application.
+
+---
+
+## 5. User Access Controls
+
+### ADO Permissions
+- Only project contributors can run pipelines
+- PAT stored in Azure DevOps Library with secret variable group
+- Health check and rollback scripts run under service connection identity
+
+### Approval Groups
+- PROD stage includes manual approval from specified AAD group
+- Group ID passed via config
+
+---
+
+## 6. Application Security
+
+- PAT (Personal Access Token) stored securely in Azure DevOps variable groups
+- No credentials hardcoded
+- Health check endpoints use HTTPS and support TLS 1.2
+- PowerShell scripts sanitized and input validated
+
+---
+
+## 7. Performance
+
+### Current Manual Process:
+- Release Notes: ~15 mins
+- PROD Stage Configuration: ~15 mins
+- Total: ~30 mins per application
+
+### Post-Automation:
+- Release Notes: ~1-2 mins
+- PROD Stage Automation: ~1-2 mins
+- 90%+ time savings per application
+- Parallel execution scales efficiently
+
+---
+
+## 8. Service Introduction Plan
+
+### Documentation & Onboarding
+- Provide user guide for DevOps team
+- Sample configuration for new apps
+- Schedule knowledge transfer sessions
+
+### Operational Readiness
+- Integrate into CI/CD onboarding process
+- Use pilot apps to validate new deployments
+- Add monitoring/logging for execution failures
+
+---
+
+## 9. Infrastructure Services Used
+
+- Azure DevOps Pipelines (YAML + Classic Release)
+- Azure DevOps Variable Groups
+- Hosted Microsoft agents (windows-latest)
+- PowerShell Core
+- Git for config storage
+
+**Optional Extensions:**
+- Azure Monitor for endpoint tracking
+- Power BI for status dashboards
+- Key Vault for centralized secret management
+
+---
+
+**Prepared By:** DevOps Automation Team  
+**Date:** April 2025
+
+--------------------------------------------------------------------------------------------
+  Automated Release Pipeline Management System
+Design Document for Scaling to 100+ Applications
+
+1. POC Description
+1.1 Automated Release Notes Creation
+Objective: Automatically generate release notes for Azure DevOps pipelines by extracting work items, commits, and PRs associated with each release.
+
+Key Features:
+
+Fetches work items (User Stories, Bugs, Tasks) linked to the build
+
+Includes commit messages and PR descriptions
+
+Formats release notes in Markdown/HTML
+
+Publishes to Azure Wiki/SharePoint/Teams
+
+Technologies Used:
+
+Azure DevOps REST API (for work items, builds, releases)
+
+PowerShell (data processing and formatting)
+
+Azure Pipelines YAML (orchestration)
+
+1.2 Automated PROD Stage Creation, Health Checks & Rollbacks
+Objective: Automate the creation of a PROD stage in existing release pipelines with built-in health checks and rollback mechanisms.
+
+Key Features:
+
+PROD Stage Automation: Clones pre-prod stage and configures approvals
+
+Health Checks: Validates API/IIS status before deployment
+
+Auto-Rollback: Reverts to last stable version if health checks fail
+
+JSON/CSV Config: Supports per-application settings
+
+Technologies Used:
+
+Azure DevOps Release API
+
+PowerShell (for health checks & IIS rollback)
+
+JSON Configuration (application-specific settings)
+
+2. Scaling to 100+ Applications
+2.1 Centralized Configuration Management
+Single JSON/CSV file storing:
+
+json
+{
+    "applications": [
+        {
+            "pipelineId": 123,
+            "name": "App1",
+            "servers": ["Server1", "Server2"],
+            "deploymentRoot": "C:\\Deployments\\App1",
+            "webApplicationName": "App1",
+            "healthCheckUrl": "http://localhost/api/health"
+        }
+    ]
+}
+Dynamic Pipeline Processing: Script loops through all applications and applies changes.
+
+2.2 Template-Based Pipelines
+Shared YAML Templates for:
+
+Release notes generation
+
+PROD stage deployment
+
+Variable Groups for secrets (e.g., ADO_PAT, server credentials).
+
+2.3 Automated Testing & Validation
+Pre-deployment checks:
+
+Validate JSON config before execution
+
+Test connectivity to servers
+
+Post-deployment checks:
+
+Automated smoke tests
+
+Logging success/failure in Azure Log Analytics
+
+3. Architecture Diagram
+Diagram
+Code
+
+
+
+
+
+
+
+
+
+
+
+
+4. Conceptual Data Model
+Entity	Description	Example
+Application	Azure DevOps pipeline + config	{ "pipelineId": 123, "name": "App1" }
+ReleaseNotes	Generated notes (Markdown/HTML)	"## Release 1.0.0\n- Fixed bug #123"
+Deployment	PROD stage deployment logs	{ "status": "Success", "timestamp": "..." }
+HealthCheck	API/IIS health status	{ "status": 200, "responseTime": "150ms" }
+5. User Access Controls
+Role	Permissions	Example
+Release Managers	Approve PROD deployments, modify config	Manual approval in PROD stage
+Developers	Trigger releases, view logs	Limited to DEV/TEST environments
+DevOps Engineers	Edit pipeline templates, manage secrets	Access to Variable Groups
+Security Measures:
+
+Azure DevOps RBAC (Role-Based Access Control)
+
+PAT (Personal Access Token) with limited scope
+
+Key Vault Integration for secrets
+
+6. Application Security
+6.1 Secure Credential Handling
+Azure Key Vault for:
+
+Admin passwords ($(AdminPassword))
+
+API keys
+
+Restricted PATs (only Release Management scope)
+
+6.2 Network Security
+Firewall Rules: Only allow Azure DevOps IP ranges
+
+TLS 1.2+ Enforcement in PowerShell scripts
+
+6.3 Audit Logging
+Azure Monitor tracks:
+
+Who triggered deployments
+
+Rollback events
+
+Health check failures
+
+7. Performance Metrics
+Task	Manual Time	Automated Time	Improvement
+Release Notes Generation	30 mins	2 mins	15x faster
+PROD Stage Deployment	30 mins	3 mins	10x faster
+Rollback Execution	15-20 mins	1 min	20x faster
+Expected Gains for 100+ Apps:
+
+~50 hours/month saved in manual effort
+
+Zero human errors in release notes
+
+8. Service Introduction (Handover Plan)
+8.1 Training
+Workshops for:
+
+Configuring JSON files
+
+Monitoring deployments
+
+Documentation:
+
+How to add new applications
+
+Troubleshooting health checks
+
+8.2 Support Model
+L1 Support (Dev Teams): Basic config changes
+
+L2 Support (DevOps): Debugging pipeline failures
+
+8.3 Rollout Phases
+Pilot (5 apps) – Validate stability
+
+Phase 1 (30 apps) – Monitor performance
+
+Full Scale (100+ apps) – Automated onboarding
+
+9. Infrastructure Services Used
+Service	Purpose
+Azure DevOps	Pipeline execution, work item tracking
+PowerShell	Health checks, IIS management, rollback
+Azure Key Vault	Secure credential storage
+Azure Monitor	Logging & alerts
+Teams/Email	Notifications for failures
+Conclusion
+This system automates release notes and PROD deployments while ensuring:
+✅ Scalability (100+ apps via JSON config)
+✅ Security (RBAC, Key Vault, TLS)
+✅ Performance (10-20x faster than manual)
+✅ Reliability (Auto-rollback on failures)
+
+Next Steps:
+
+Finalize JSON config for all 100 apps
+
+Conduct training for DevOps teams
+
+Monitor automated deployments for a month

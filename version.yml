@@ -68,3 +68,43 @@
 
       # Optionally: Set as pipeline variable if needed
       Write-Host "##vso[task.setvariable variable=AssemblyVersion]$assemblyVersion"
+      ==================================================================================================================
+      $files = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Recurse -Filter "AssemblyInfo.cs" -ErrorAction SilentlyContinue
+
+      if (!$files) {
+        Write-Error "No AssemblyInfo.cs files found."
+        exit 1
+      }
+
+      $versionPattern = '\[assembly:\s*AssemblyVersion\("([\d\.]+)"\)\]'
+      $versionList = @()
+
+      foreach ($file in $files) {
+        $content = Get-Content $file.FullName -Raw
+        $matches = [regex]::Matches($content, $versionPattern)
+
+        foreach ($match in $matches) {
+          $versionString = $match.Groups[1].Value
+          try {
+            $version = [System.Version]$versionString
+            $versionList += [PSCustomObject]@{
+              Path    = $file.FullName
+              Version = $version
+            }
+          } catch {
+            Write-Host "Invalid version in file: $($file.FullName) -> $versionString"
+          }
+        }
+      }
+
+      if ($versionList.Count -eq 0) {
+        Write-Error "No valid AssemblyVersion entries found."
+        exit 1
+      }
+
+      $highest = $versionList | Sort-Object Version -Descending | Select-Object -First 1
+
+      Write-Host "##[section]Highest AssemblyVersion Found:"
+      Write-Host "File: $($highest.Path)"
+      Write-Host "Version: $($highest.Version)"
+      ======================================================================================================================

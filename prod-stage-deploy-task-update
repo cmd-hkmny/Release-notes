@@ -198,3 +198,42 @@ function Add-ProdStage {
 foreach ($id in $PipelineIds) {
     Add-ProdStage -PipelineId $id
 }
+===========================================================================================================================
+function Update-TaskArguments {
+    param(
+        [object]$Task,
+        [object]$Config
+    )
+
+    # Debug: Show what we're working with
+    Write-Host "`n[DEBUG] Checking task: $($Task.name)"
+    Write-Host "[DEBUG] Config has Machines: $($Config.PSObject.Properties['Machines'] -ne $null)"
+    Write-Host "[DEBUG] Task has machines input: $($Task.inputs.PSObject.Properties['machines'] -ne $null)"
+
+    # Only proceed if we have a valid task with inputs
+    if (-not $Task -or -not $Task.inputs) {
+        Write-Host "[WARNING] Invalid task or missing inputs"
+        return
+    }
+
+    # Enhanced machines update check
+    $configHasMachines = $Config.PSObject.Properties['Machines'] -and $Config.Machines
+    $taskHasMachines = $Task.inputs.PSObject.Properties['machines'] -ne $null
+
+    if ($configHasMachines -and $taskHasMachines) {
+        Write-Host "[DEBUG] Current machines value: $($Task.inputs.machines)"
+        Write-Host "[DEBUG] Updating machines to: $($Config.Machines)"
+        
+        $Task.inputs.machines = $Config.Machines
+        Write-Host "SUCCESS: Updated machines to: $($Config.Machines)"
+    }
+    elseif (-not $configHasMachines) {
+        Write-Host "[INFO] No Machines configuration found in config.json"
+    }
+    elseif (-not $taskHasMachines) {
+        Write-Host "[INFO] Task '$($Task.name)' doesn't have a machines input"
+    }
+
+    # [Rest of your existing argument update code...]
+}
+======================================================================================================================

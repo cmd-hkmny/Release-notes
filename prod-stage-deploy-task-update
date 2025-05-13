@@ -1,0 +1,200 @@
+param(
+    [string]$Org,
+    [string]$Project,
+    [string]$Pat,
+    [string]$ApiVersion = "7.1-preview.4",
+    [string]$PipelineIds,
+    [string]$ConfigPath,
+    [string]$ApprovalGroupId
+)
+
+# Convert pipeline IDs to array
+$PipelineIds = $PipelineIds -split "," | ForEach-Object { [int]$_.Trim() }
+
+# Set up authentication
+$base64Auth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$Pat"))
+$Headers = @{
+    "Authorization" = "Basic $base64Auth"
+    "Content-Type" = "application/json"
+}
+
+# Load production configuration
+$ProdConfig = Get-Content $ConfigPath | ConvertFrom-Json
+
+function Update-TaskArguments {
+    param(
+        [object]$Task,
+        [object]$Config
+    )
+
+    # Skip if invalid task or no inputs
+    if (-not $Task -or -not $Task.inputs) {
+        return
+    }
+
+    # Update machines if specified in config and task has machines input
+    if ($Config.Machines -and $Task.inputs.PSObject.Properties['machines']) {
+        $Task.inputs.machines = $Config.Machines
+        Write-Host "Updated machines to: $($Config.Machines)"
+    }
+
+    # Process script arguments if they exist
+    if ($Task.inputs.PSObject.Properties['scriptArguments']) {
+        $currentArgs = $Task.inputs.scriptArguments
+        $argsHash = @{}
+
+        # Parse existing arguments into hashtable
+        if ($currentArgs) {
+            $argPattern = '(?:^|\s)(-{1,2})([a-zA-Z][a-zA-Z0-9]*)\s+"([^"]*)"'
+            $matches = [regex]::Matches($currentArgs, $argPattern)
+            
+            foreach ($match in $matches) {
+                $paramName = $match.Groups[2].Value
+                $paramValue = $match.Groups[3].Value
+                $argsHash[$paramName] = $paramValue
+            }
+        }
+
+        # Update only parameters that exist in both config and current arguments
+        $configProperties = $Config | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name
+        foreach ($param in $configProperties) {
+            if ($param -ne "Machines" -and $argsHash.ContainsKey($param)) {
+                $argsHash[$param] = $Config.$param
+                Write-Host "Updated argument: -$param $($Config.$param)"
+            }
+        }
+
+        # Rebuild arguments string maintaining original order
+        $newArgs = @()
+        if ($currentArgs) {
+            # First pass: Update existing arguments
+            $currentArgs = [regex]::Replace($currentArgs, '(?:^|\s)(-{1,2})([a-zA-Z][a-zA-Z0-9]*)\s+"([^"]*)"', {
+                param($match)
+                $paramName = $match.Groups[2].Value
+                if ($argsHash.ContainsKey($paramName)) {
+                    "-$paramName `"$($argsHash[$paramName])`""
+                } else {
+                    $match.Value
+                }
+            })
+        }
+
+        # Second pass: Add any new arguments from config that weren't present
+        foreach ($param in $configProperties) {
+            if ($param -ne "Machines" -and -not $currentArgs.Contains("-$param ")) {
+                $currentArgs += " -$param `"$($Config.$param)`""
+            }
+        }
+
+        $Task.inputs.scriptArguments = $currentArgs.Trim()
+    }
+}
+
+function Add-ProdStage {
+    param([int]$PipelineId)
+
+    try {
+        $url = "https://vsrm.dev.azure.com/$Org/$Project/_apis/release/definitions/$PipelineId`?api-version=$ApiVersion"
+        $pipeline = Invoke-RestMethod -Uri $url -Headers $Headers -Method Get
+
+        if ($pipeline.environments.name -contains 'prod') {
+            Write-Host "Pipeline $PipelineId already has prod stage - skipping"
+            return
+        }
+
+        # Find pre-prod stage and its index
+        $environments = @($pipeline.environments)
+        $preProdIndex = -1
+        for ($i = 0; $i -lt $environments.Count; $i++) {
+            if ($environments[$i].name -eq 'pre-prod') {
+                $preProdIndex = $i
+                break
+            }
+        }
+
+        if ($preProdIndex -eq -1) {
+            Write-Host "No pre-prod stage found in pipeline $PipelineId - skipping"
+            return
+        }
+
+        # Clone pre-prod stage
+        $prodStage = $environments[$preProdIndex] | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+
+        # Clean IDs and set name
+        $prodStage.PSObject.Properties.Remove('id')
+        $prodStage.name = "prod"
+
+        # Update tasks with production config
+        foreach ($phase in $prodStage.deployPhases) {
+            $phase.PSObject.Properties.Remove('phaseId')
+            foreach ($task in $phase.workflowTasks) {
+                $task.PSObject.Properties.Remove('id')
+                Update-TaskArguments -Task $task -Config $ProdConfig
+            }
+        }
+
+        # Insert PROD immediately after PRE-PROD
+        $newEnvironments = New-Object System.Collections.ArrayList
+        for ($i = 0; $i -lt $environments.Count; $i++) {
+            $null = $newEnvironments.Add($environments[$i])
+            if ($i -eq $preProdIndex) {
+                $null = $newEnvironments.Add($prodStage)
+                Write-Host "Inserted PROD stage immediately after PRE-PROD at position $($i + 1)"
+            }
+        }
+
+        $pipeline.environments = $newEnvironments
+
+        # Re-rank all stages
+        for ($i = 0; $i -lt $pipeline.environments.Count; $i++) {
+            $pipeline.environments[$i].rank = $i + 1
+        }
+
+        # Submit update
+        $result = Invoke-RestMethod -Uri $url -Headers $Headers -Method Put -Body ($pipeline | ConvertTo-Json -Depth 20)
+        
+        # Verify update
+        $updated = Invoke-RestMethod -Uri $url -Headers $Headers -Method Get
+        $stageNames = ($updated.environments | Sort-Object rank | Select-Object -ExpandProperty name) -join " -> "
+        
+        Write-Host "Successfully updated pipeline $PipelineId"
+        Write-Host "Final stage order: $stageNames"
+
+        # Verify PROD position
+        $preProdPos = [array]::IndexOf($updated.environments.name, 'pre-prod')
+        $prodPos = [array]::IndexOf($updated.environments.name, 'prod')
+        
+        if ($prodPos -ne ($preProdPos + 1)) {
+            Write-Host "ERROR: PROD stage not in correct position!"
+            Write-Host "Expected after PRE-PROD (position $preProdPos) but found at $prodPos"
+            exit 1
+        }
+
+        Write-Host "Verified PROD stage is immediately after PRE-PROD"
+
+        # Verify arguments were updated
+        $prodStage = $updated.environments | Where-Object { $_.name -eq 'prod' }
+        foreach ($phase in $prodStage.deployPhases) {
+            foreach ($task in $phase.workflowTasks) {
+                if ($task.inputs.scriptArguments) {
+                    Write-Host "Task $($task.name) arguments: $($task.inputs.scriptArguments)"
+                }
+                if ($task.inputs.machines) {
+                    Write-Host "Task $($task.name) machines: $($task.inputs.machines)"
+                }
+            }
+        }
+    }
+    catch {
+        Write-Host "ERROR updating pipeline $PipelineId : $($_.Exception.Message)"
+        if ($_.ErrorDetails.Message) {
+            Write-Host "Detailed error: $($_.ErrorDetails.Message)"
+        }
+        exit 1
+    }
+}
+
+# Process all pipelines
+foreach ($id in $PipelineIds) {
+    Add-ProdStage -PipelineId $id
+}

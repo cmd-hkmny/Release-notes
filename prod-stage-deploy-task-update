@@ -237,3 +237,119 @@ function Update-TaskArguments {
     # [Rest of your existing argument update code...]
 }
 ======================================================================================================================
+
+param(
+    [string]$Org,
+    [string]$Project,
+    [string]$Pat,
+    [string]$ApiVersion = "7.1-preview.4",
+    [string]$PipelineIds,
+    [string]$ConfigPath,
+    [string]$ApprovalGroupId
+)
+
+# Convert pipeline IDs to array
+$PipelineIds = $PipelineIds -split "," | ForEach-Object { [int]$_.Trim() }
+
+# Set up authentication
+$base64Auth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$Pat"))
+$Headers = @{
+    "Authorization" = "Basic $base64Auth"
+    "Content-Type" = "application/json"
+}
+
+# Load production configuration
+$ProdConfig = Get-Content $ConfigPath | ConvertFrom-Json
+
+function Update-TaskArguments {
+    param(
+        [object]$Task,
+        [object]$Config
+    )
+
+    # Skip if invalid task or no inputs
+    if (-not $Task -or -not $Task.inputs) {
+        Write-Host "Task or inputs not found - skipping"
+        return
+    }
+
+    # Debug: Show available input properties
+    Write-Host "`nTask: $($Task.name)"
+    Write-Host "Available inputs: $($Task.inputs.PSObject.Properties.Name -join ', ')"
+
+    # Case-insensitive check for machines property
+    $machinesProp = $Task.inputs.PSObject.Properties | 
+                   Where-Object { $_.Name -eq 'machines' } | 
+                   Select-Object -First 1
+
+    if ($Config.Machines -and $machinesProp) {
+        try {
+            Write-Host "Updating machines from '$($Task.inputs.$($machinesProp.Name))' to '$($Config.Machines)'"
+            $Task.inputs.$($machinesProp.Name) = $Config.Machines
+            Write-Host "Successfully updated machines"
+        }
+        catch {
+            Write-Host "WARNING: Could not update machines - $($_.Exception.Message)"
+        }
+    }
+    else {
+        if (-not $Config.Machines) {
+            Write-Host "No Machines configuration found in config.json"
+        }
+        if (-not $machinesProp) {
+            Write-Host "Task doesn't have a machines input property"
+        }
+    }
+
+    # Process script arguments if they exist
+    if ($Task.inputs.PSObject.Properties['scriptArguments']) {
+        $currentArgs = $Task.inputs.scriptArguments
+        $argsHash = @{}
+
+        # Parse existing arguments into hashtable
+        if ($currentArgs) {
+            $argPattern = '(?:^|\s)(-{1,2})([a-zA-Z][a-zA-Z0-9]*)\s+"([^"]*)"'
+            $matches = [regex]::Matches($currentArgs, $argPattern)
+            
+            foreach ($match in $matches) {
+                $paramName = $match.Groups[2].Value
+                $paramValue = $match.Groups[3].Value
+                $argsHash[$paramName] = $paramValue
+            }
+        }
+
+        # Update only parameters that exist in both config and current arguments
+        $configProperties = $Config | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name
+        foreach ($param in $configProperties) {
+            if ($param -ne "Machines" -and $argsHash.ContainsKey($param)) {
+                $argsHash[$param] = $Config.$param
+                Write-Host "Updated argument: -$param $($Config.$param)"
+            }
+        }
+
+        # Rebuild arguments string maintaining original order
+        $newArgs = @()
+        if ($currentArgs) {
+            # First pass: Update existing arguments
+            $currentArgs = [regex]::Replace($currentArgs, '(?:^|\s)(-{1,2})([a-zA-Z][a-zA-Z0-9]*)\s+"([^"]*)"', {
+                param($match)
+                $paramName = $match.Groups[2].Value
+                if ($argsHash.ContainsKey($paramName)) {
+                    "-$paramName `"$($argsHash[$paramName])`""
+                } else {
+                    $match.Value
+                }
+            })
+        }
+
+        # Second pass: Add any new arguments from config that weren't present
+        foreach ($param in $configProperties) {
+            if ($param -ne "Machines" -and -not $currentArgs.Contains("-$param ")) {
+                $currentArgs += " -$param `"$($Config.$param)`""
+            }
+        }
+
+        $Task.inputs.scriptArguments = $currentArgs.Trim()
+    }
+}
+===================================================================================

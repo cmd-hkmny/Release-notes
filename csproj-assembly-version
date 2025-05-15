@@ -1,0 +1,86 @@
+# Search for version in AssemblyInfo.cs first
+Write-Host "Searching for AssemblyVersion in AssemblyInfo.cs files..."
+$assemblyFiles = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Recurse -Filter "AssemblyInfo.cs" -ErrorAction SilentlyContinue
+
+$versionList = @()
+
+if ($assemblyFiles) {
+    $versionPattern = '\[assembly:\s*AssemblyVersion\("([\d\.]+)"\)\]'
+    
+    foreach ($file in $assemblyFiles) {
+        $content = Get-Content $file.FullName -Raw
+        $matches = [regex]::Matches($content, $versionPattern)
+        
+        foreach ($match in $matches) {
+            $versionString = $match.Groups[1].Value
+            try {
+                $version = [System.Version]$versionString
+                $versionList += [PSCustomObject]@{
+                    Path = $file.FullName
+                    Version = $version
+                    Source = "AssemblyInfo.cs"
+                }
+                Write-Host "Found version $version in $($file.FullName)"
+            }
+            catch {
+                Write-Host "Invalid version in file: $($file.FullName) -> $versionString"
+            }
+        }
+    }
+}
+
+# If no AssemblyInfo.cs versions found, check .csproj file
+if ($versionList.Count -eq 0) {
+    Write-Host "No valid AssemblyVersion entries found in AssemblyInfo.cs, checking .csproj file..."
+    
+    $repoName = Split-Path -Leaf "$(Build.SourcesDirectory)"
+    $csprojFile = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Recurse -Filter "$repoName.csproj" -ErrorAction SilentlyContinue | Select-Object -First 1
+    
+    if ($csprojFile) {
+        Write-Host "Found .csproj file: $($csprojFile.FullName)"
+        
+        try {
+            [xml]$projContent = Get-Content $csprojFile.FullName
+            
+            # Check for different version properties in .csproj
+            $version = $projContent.Project.PropertyGroup.Version ??
+                      $projContent.Project.PropertyGroup.PackageVersion ??
+                      $projContent.Project.PropertyGroup.VersionPrefix
+            
+            if ($version) {
+                try {
+                    $versionObj = [System.Version]$version
+                    $versionList += [PSCustomObject]@{
+                        Path = $csprojFile.FullName
+                        Version = $versionObj
+                        Source = ".csproj"
+                    }
+                    Write-Host "Found version $version in $($csprojFile.FullName)"
+                }
+                catch {
+                    Write-Host "Invalid version in .csproj file: $version"
+                }
+            }
+            else {
+                Write-Host "No version information found in .csproj file"
+            }
+        }
+        catch {
+            Write-Host "Error reading .csproj file: $_"
+        }
+    }
+    else {
+        Write-Host "No $repoName.csproj file found"
+    }
+}
+
+# Final check and output
+if ($versionList.Count -eq 0) {
+    Write-Error "No valid version entries found in either AssemblyInfo.cs or .csproj file."
+    exit 1
+}
+
+$highest = $versionList | Sort-Object Version -Descending | Select-Object -First 1
+$AssemblyVersion = "$($highest.Version)"
+Write-Host "##vso[task.setvariable variable=AssemblyVersion]$AssemblyVersion"
+Write-Host "##[section]Highest version found ($($highest.Source)): $AssemblyVersion"

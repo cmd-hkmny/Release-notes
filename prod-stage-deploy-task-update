@@ -353,3 +353,305 @@ function Update-TaskArguments {
     }
 }
 ===================================================================================
+
+<#
+.SYNOPSIS
+    Creates PROD stages by cloning PRE-PROD stages, removing disabled tasks, and setting approvals
+.DESCRIPTION
+    This enhanced script:
+    1. Clones PRE-PROD stages to create PROD stages
+    2. Completely removes disabled tasks from the new PROD stage
+    3. Updates remaining tasks with values from Config.json
+    4. Configures pre- and post-deployment approvals
+#>
+
+param(
+    [string]$Org,
+    [string]$Project,
+    [string]$Pat,
+    [string]$ApiVersion = "7.1-preview.4",
+    [string]$PipelineIds,
+    [string]$ConfigPath,
+    [string]$ApprovalGroupId
+)
+
+# Set up authentication
+$base64Auth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$Pat"))
+$headers = @{
+    Authorization = "Basic $base64Auth"
+    "Content-Type" = "application/json"
+}
+
+# Logging function
+function Write-Log {
+    param([string]$message, [string]$level = "INFO")
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $logEntry = "[$timestamp] [$level] $message"
+    Write-Host $logEntry
+    Add-Content -Path ".\DeploymentLog.log" -Value $logEntry
+}
+
+# Load configuration
+try {
+    $configData = Get-Content $ConfigPath -Raw | ConvertFrom-Json
+    Write-Log "Loaded configuration file successfully" -level "DEBUG"
+}
+catch {
+    Write-Log "Failed to load configuration: $_" -level "ERROR"
+    exit 1
+}
+
+# Create config lookup with integer keys
+$pipelineConfigs = @{}
+foreach ($pipeline in $configData.Pipelines) {
+    try {
+        $id = [int]$pipeline.PipelineId
+        $pipelineConfigs[$id] = $pipeline.Config
+        Write-Log "Loaded config for Pipeline ID $id" -level "DEBUG"
+    }
+    catch {
+        Write-Log "Invalid PipelineId in config: $($pipeline.PipelineId)" -level "ERROR"
+    }
+}
+
+# Convert pipeline IDs to integers
+[int[]]$PipelineIds = $PipelineIds -split ',' | ForEach-Object {
+    try {
+        $id = [int]$_.Trim()
+        Write-Log "Processing Pipeline ID: $id" -level "DEBUG"
+        $id
+    }
+    catch {
+        Write-Log "Invalid Pipeline ID format: $_" -level "ERROR"
+    }
+}
+
+$baseUrl = "https://vsrm.dev.azure.com/$Org/$Project"
+
+function Update-TaskConfiguration {
+    param(
+        [object]$task,
+        [object]$config
+    )
+
+    if (-not $task -or -not $task.inputs) {
+        Write-Log "Task or inputs are null" -level "DEBUG"
+        return
+    }
+
+    # List of parameters to update (case-insensitive)
+    $parametersToUpdate = @{
+        "ApiServer" = $config.ApiServer
+        "DeploymentFolder" = $config.DeploymentFolder
+        "DNSRepoName" = $config.DNSRepoName
+        "AdminLogin" = $config.AdminLogin
+        "AdminPassword" = $config.AdminPassword
+    }
+
+    Write-Log "Updating task: $($task.name)" -level "DEBUG"
+
+    # Update direct task inputs
+    foreach ($param in $parametersToUpdate.Keys) {
+        $matchingKey = $task.inputs.PSObject.Properties.Name | 
+                      Where-Object { $_ -like $param } | 
+                      Select-Object -First 1
+        
+        if ($matchingKey -and $parametersToUpdate[$param]) {
+            $task.inputs.$matchingKey = $parametersToUpdate[$param]
+            Write-Log "Updated input '$matchingKey' to '$($parametersToUpdate[$param])'" -level "INFO"
+        }
+    }
+
+    # Update script arguments if they exist
+    if ($task.inputs.scriptArguments) {
+        $argsString = $task.inputs.scriptArguments
+        $originalArgs = $argsString
+        
+        foreach ($param in $parametersToUpdate.Keys) {
+            if ($parametersToUpdate[$param]) {
+                # Handle different argument formats
+                $patterns = @(
+                    "(-{1,2}$param)\s+""([^""]*)""",  # Quoted values
+                    "(-{1,2}$param)\s+([^\s]+)"       # Unquoted values
+                )
+
+                foreach ($pattern in $patterns) {
+                    if ($argsString -match $pattern) {
+                        $argsString = $argsString -replace $pattern, "`$1 ""$($parametersToUpdate[$param])"""
+                        Write-Log "Updated script argument '$param'" -level "INFO"
+                    }
+                }
+
+                # Add if not present
+                if (-not $argsString.Contains("-$param ") -and -not $argsString.Contains("--$param ")) {
+                    $argsString += " -$param ""$($parametersToUpdate[$param])"""
+                    Write-Log "Added script argument '-$param'" -level "INFO"
+                }
+            }
+        }
+        
+        if ($argsString -ne $originalArgs) {
+            $task.inputs.scriptArguments = $argsString.Trim()
+        }
+    }
+}
+
+function Set-StageApprovals {
+    param(
+        [object]$stage,
+        [string]$approvalGroupId
+    )
+
+    # Update approvals - Simplified and enforced to one group
+    foreach ($approvalType in @('preDeployApprovals', 'postDeployApprovals')) {
+        # Ensure the approval block exists
+        if ($null -eq $stage.$approvalType) {
+            $stage | Add-Member -MemberType NoteProperty -Name $approvalType -Value @{}
+        }
+
+        # Set exactly one approval group
+        $stage.$approvalType.approvals = @(
+            @{
+                rank = 1
+                isAutomated = ($approvalType -eq 'postDeployApprovals')  # true for post, false for pre
+                isNotificationOn = $true
+                approver = @{
+                    id = $approvalGroupId
+                    displayName = "PROD Approval Group"
+                    isGroup = $true
+                }
+            }
+        )
+
+        # Set approval options
+        $stage.$approvalType.approvalOptions = @{
+            requiredApproverCount = 1
+            releaseCreatorCanBeApprover = $false
+            autoTriggeredAndPreviousEnvironmentApprovedCanBeSkipped = $false
+            enforceIdentityRevalidation = $false
+            timeoutInMinutes = 0
+            executionOrder = if ($approvalType -eq 'preDeployApprovals') { "beforeGates" } else { "afterSuccessfulGates" }
+        }
+
+        Write-Log "Configured $approvalType with approval group $approvalGroupId" -level "INFO"
+    }
+}
+
+function Clone-Stage {
+    param(
+        [object]$sourceStage,
+        [string]$newName,
+        [object]$config,
+        [string]$approvalGroupId
+    )
+
+    $newStage = $sourceStage | ConvertTo-Json -Depth 15 | ConvertFrom-Json
+    $newStage.PSObject.Properties.Remove('id')
+    $newStage.name = $newName
+
+    # Process all deploy phases
+    foreach ($phase in $newStage.deployPhases) {
+        $phase.PSObject.Properties.Remove('phaseId')
+        
+        # Create new array for enabled tasks only
+        $enabledTasks = New-Object System.Collections.ArrayList
+        
+        foreach ($task in $phase.workflowTasks) {
+            if ($task.enabled -eq $true) {
+                $task.PSObject.Properties.Remove('id')
+                Update-TaskConfiguration -task $task -config $config
+                $null = $enabledTasks.Add($task)
+                Write-Log "Included enabled task: $($task.name)" -level "INFO"
+            }
+            else {
+                Write-Log "Removing disabled task: $($task.name)" -level "INFO"
+            }
+        }
+        
+        # Replace workflowTasks with only enabled tasks
+        $phase.workflowTasks = $enabledTasks.ToArray()
+    }
+
+    # Configure approvals for the new stage
+    Set-StageApprovals -stage $newStage -approvalGroupId $approvalGroupId
+
+    return $newStage
+}
+
+function Add-ProdStage {
+    param([int]$pipelineId, [object]$config, [string]$approvalGroupId)
+
+    try {
+        $url = "$baseUrl/_apis/release/definitions/$pipelineId`?api-version=$ApiVersion"
+        $pipeline = Invoke-RestMethod -Uri $url -Headers $headers -Method Get
+
+        # Check if PROD stage exists
+        if ($pipeline.environments.name -contains 'prod') {
+            Write-Log "Pipeline $pipelineId already has PROD stage - skipping" -level "WARN"
+            return $false
+        }
+
+        # Find PRE-PROD stage
+        $preProdStage = $pipeline.environments | Where-Object { $_.name -eq 'pre-prod' }
+        if (-not $preProdStage) {
+            Write-Log "No PRE-PROD stage found in pipeline $pipelineId - skipping" -level "WARN"
+            return $false
+        }
+
+        # Clone PRE-PROD to create PROD (removing disabled tasks and setting approvals)
+        $prodStage = Clone-Stage -sourceStage $preProdStage -newName "prod" -config $config -approvalGroupId $approvalGroupId
+
+        # Insert PROD after PRE-PROD
+        $environments = [System.Collections.ArrayList]@($pipeline.environments)
+        $preProdIndex = $environments.IndexOf($preProdStage)
+        $environments.Insert($preProdIndex + 1, $prodStage)
+
+        # Update ranks
+        for ($i = 0; $i -lt $environments.Count; $i++) {
+            $environments[$i].rank = $i + 1
+        }
+
+        $pipeline.environments = $environments
+
+        # Update the pipeline
+        $updatedPipeline = Invoke-RestMethod -Uri $url -Headers $headers -Method Put `
+            -Body ($pipeline | ConvertTo-Json -Depth 15)
+
+        Write-Log "Successfully updated pipeline $pipelineId (disabled tasks removed, approvals set)" -level "INFO"
+        return $true
+    }
+    catch {
+        Write-Log "ERROR processing pipeline $pipelineId : $($_.Exception.Message)" -level "ERROR"
+        if ($_.ErrorDetails.Message) {
+            Write-Log "Detailed error: $($_.ErrorDetails.Message)" -level "ERROR"
+        }
+        return $false
+    }
+}
+
+# Main execution
+Write-Log "Starting PROD stage creation process (removing disabled tasks and setting approvals)"
+$successCount = 0
+
+foreach ($id in $PipelineIds) {
+    if (-not $pipelineConfigs.ContainsKey($id)) {
+        Write-Log "No configuration found for Pipeline ID $id" -level "ERROR"
+        continue
+    }
+    
+    $config = $pipelineConfigs[$id]
+    
+    if (Add-ProdStage -pipelineId $id -config $config -approvalGroupId $ApprovalGroupId) {
+        $successCount++
+    }
+}
+
+# Exit with proper status code
+if ($successCount -eq $PipelineIds.Count) {
+    Write-Log "All pipelines updated successfully (disabled tasks removed, approvals configured)" -level "INFO"
+    exit 0
+} else {
+    Write-Log "Failed to update all pipelines (success: $successCount/$($PipelineIds.Count))" -level "ERROR"
+    exit 1
+}
+================================================================================================================

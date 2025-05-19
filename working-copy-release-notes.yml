@@ -111,3 +111,209 @@ steps:
       }
       
       Write-Host "`n✅ Release notes generation completed"
+      ========================================================================================================
+      <#
+.SYNOPSIS
+    Creates PROD stages by cloning PRE-PROD stages and updates all required configurations
+.DESCRIPTION
+    This enhanced script:
+    1. Clones PRE-PROD stages to create PROD stages
+    2. Updates all specified task arguments (ApiServer, DeploymentFolder, DNSRepoName)
+    3. Handles both direct task inputs and script arguments
+#>
+
+param(
+    [string]$Org,
+    [string]$Project,
+    [string]$Pat,
+    [string]$ApiVersion = "7.1-preview.4",
+    [string[]]$PipelineIds,
+    [string]$ConfigPath,
+    [string]$ApprovalGroupId
+)
+
+# Set up authentication
+$base64Auth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$Pat"))
+$headers = @{
+    Authorization = "Basic $base64Auth"
+    "Content-Type" = "application/json"
+}
+
+# Load production configuration
+$prodConfig = Get-Content $ConfigPath -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+$baseUrl = "https://vsrm.dev.azure.com/$Org/$Project"
+
+# Logging function
+function Write-Log {
+    param([string]$message, [string]$level = "INFO")
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $logEntry = "[$timestamp] [$level] $message"
+    Write-Host $logEntry
+    Add-Content -Path ".\DeploymentLog.log" -Value $logEntry
+}
+
+function Update-TaskConfiguration {
+    param(
+        [object]$task,
+        [object]$config
+    )
+
+    if (-not $task -or -not $task.inputs) { return }
+
+    # List of parameters we want to update
+    $parametersToUpdate = @(
+        "ApiServer",
+        "DeploymentFolder",
+        "DNSRepoName",
+        "AdminLogin",
+        "AdminPassword"
+    )
+
+    # Update direct task inputs
+    foreach ($param in $parametersToUpdate) {
+        if ($config.$param -and $task.inputs.PSObject.Properties[$param]) {
+            $task.inputs.$param = $config.$param
+            Write-Log "Updated $param for task $($task.name) to: $($config.$param)"
+        }
+    }
+
+    # Update script arguments if they exist
+    if ($task.inputs.PSObject.Properties['scriptArguments']) {
+        $argsString = $task.inputs.scriptArguments
+        
+        foreach ($param in $parametersToUpdate) {
+            if ($config.$param) {
+                # Handle both -param and --param formats
+                $patterns = @(
+                    "(-{1,2}$param)\s+""[^""]*""",  # Quoted values
+                    "(-{1,2}$param)\s+\S+"          # Unquoted values
+                )
+
+                $updated = $false
+                foreach ($pattern in $patterns) {
+                    if ($argsString -match $pattern) {
+                        $argsString = $argsString -replace $pattern, "`$1 ""$($config.$param)"""
+                        Write-Log "Updated -$param argument in task $($task.name)"
+                        $updated = $true
+                        break
+                    }
+                }
+
+                if (-not $updated -and -not $argsString.Contains("-$param ")) {
+                    $argsString += " -$param ""$($config.$param)"""
+                    Write-Log "Added -$param argument to task $($task.name)"
+                }
+            }
+        }
+        
+        $task.inputs.scriptArguments = $argsString.Trim()
+    }
+}
+
+function Clone-Stage {
+    param(
+        [object]$sourceStage,
+        [string]$newName
+    )
+
+    $newStage = $sourceStage | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+    $newStage.PSObject.Properties.Remove('id')
+    $newStage.name = $newName
+
+    # Update all tasks in the stage
+    foreach ($phase in $newStage.deployPhases) {
+        $phase.PSObject.Properties.Remove('phaseId')
+        foreach ($task in $phase.workflowTasks) {
+            $task.PSObject.Properties.Remove('id')
+            Update-TaskConfiguration -task $task -config $prodConfig
+        }
+    }
+
+    return $newStage
+}
+
+function Add-ProdStage {
+    param([int]$pipelineId)
+
+    try {
+        $url = "$baseUrl/_apis/release/definitions/$pipelineId`?api-version=$ApiVersion"
+        $pipeline = Invoke-RestMethod -Uri $url -Headers $headers -Method Get
+
+        # Check if PROD stage already exists
+        if ($pipeline.environments.name -contains 'prod') {
+            Write-Log "Pipeline $pipelineId already has PROD stage - skipping" -level "WARN"
+            return $false
+        }
+
+        # Find PRE-PROD stage
+        $preProdStage = $pipeline.environments | Where-Object { $_.name -eq 'pre-prod' }
+        if (-not $preProdStage) {
+            Write-Log "No PRE-PROD stage found in pipeline $pipelineId - skipping" -level "WARN"
+            return $false
+        }
+
+        # Clone PRE-PROD to create PROD
+        $prodStage = Clone-Stage -sourceStage $preProdStage -newName "prod"
+
+        # Insert PROD after PRE-PROD
+        $environments = [System.Collections.ArrayList]@($pipeline.environments)
+        $preProdIndex = $environments.IndexOf($preProdStage)
+        $environments.Insert($preProdIndex + 1, $prodStage)
+
+        # Update ranks
+        for ($i = 0; $i -lt $environments.Count; $i++) {
+            $environments[$i].rank = $i + 1
+        }
+
+        $pipeline.environments = $environments
+
+        # Update the pipeline
+        $updatedPipeline = Invoke-RestMethod -Uri $url -Headers $headers -Method Put `
+            -Body ($pipeline | ConvertTo-Json -Depth 20)
+
+        # Verify all parameters were updated
+        $prodStage = $updatedPipeline.environments | Where-Object { $_.name -eq 'prod' }
+        foreach ($phase in $prodStage.deployPhases) {
+            foreach ($task in $phase.workflowTasks) {
+                Write-Log "Verifying task: $($task.name)"
+                foreach ($param in @("ApiServer", "DeploymentFolder", "DNSRepoName")) {
+                    if ($task.inputs.PSObject.Properties[$param]) {
+                        Write-Log "  $param value: $($task.inputs.$param)"
+                    }
+                }
+                if ($task.inputs.scriptArguments) {
+                    Write-Log "  Script arguments: $($task.inputs.scriptArguments)"
+                }
+            }
+        }
+
+        return $true
+    }
+    catch {
+        Write-Log "ERROR processing pipeline $pipelineId : $($_.Exception.Message)" -level "ERROR"
+        if ($_.ErrorDetails.Message) {
+            Write-Log "Detailed error: $($_.ErrorDetails.Message)" -level "ERROR"
+        }
+        return $false
+    }
+}
+
+# Main execution
+Write-Log "Starting PROD stage creation process"
+$successCount = 0
+
+foreach ($id in $PipelineIds) {
+    if (Add-ProdStage -pipelineId $id) {
+        $successCount++
+    }
+}
+
+# Exit with proper status code
+if ($successCount -eq $PipelineIds.Count) {
+    Write-Log "All pipelines updated successfully"
+    exit 0
+} else {
+    Write-Log "Failed to update all pipelines (success: $successCount/$($PipelineIds.Count))"
+    exit 1
+}
+====================================================

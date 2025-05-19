@@ -581,3 +581,267 @@ d4c48ab2-58f6-4efb-8139-af3f3f6f3df0
           Write-Error "Health check failed with status: $($resp.StatusCode)"
       }
       ---------------------------------------
+<#
+.SYNOPSIS
+    Performs health checks and automatic rollback if needed
+.DESCRIPTION
+    This script:
+    1. Checks application health status across multiple servers
+    2. Automatically rolls back if health checks fail
+    3. Returns proper exit codes for pipeline integration
+.PARAMETER DeploymentRoot
+    The root directory where deployments are stored
+.PARAMETER WebApplicationName
+    The name of the web application in IIS
+.PARAMETER Servers
+    Comma-separated list of servers to check
+.PARAMETER HealthCheckUrl
+    The URL endpoint for health checks
+.PARAMETER AdminUserName
+    Username for server authentication
+.PARAMETER AdminPassword
+    Password for server authentication
+#>
+
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$DeploymentRoot,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$WebApplicationName,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$Servers,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$HealthCheckUrl,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$AdminUserName,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$AdminPassword
+)
+
+# Enable TLS 1.2
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+# Convert servers string to array
+$serverList = $Servers -split ',' | ForEach-Object { $_.Trim() }
+
+# Initialize counters
+$global:overallSuccess = $true
+$global:anyRollbackAttempted = $false
+
+function Invoke-HealthCheck {
+    param (
+        [string]$server,
+        [string]$healthCheckUrl,
+        [System.Management.Automation.PSCredential]$cred
+    )
+    
+    try {
+        Write-Host "`n=== Health Check on $server ==="
+        
+        $session = New-PSSession -ComputerName $server -Credential $cred `
+                  -SessionOption (New-PSSessionOption -IdleTimeout $idleTimeoutMs) -ErrorAction Stop
+        
+        try {
+            $response = Invoke-Command -Session $session -ScriptBlock {
+                param($url, $timeout)
+                try {
+                    Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec $timeout
+                }
+                catch {
+                    @{ StatusCode = 500; StatusDescription = $_.Exception.Message }
+                }
+            } -ArgumentList $healthCheckUrl, $timeoutSeconds
+            
+            if ($response.StatusCode -eq 200) {
+                Write-Host "[SUCCESS] Health check passed"
+                return $true
+            }
+            else {
+                Write-Host "[FAILURE] Health check failed (Status: $($response.StatusCode))"
+                Write-Host "Response: $($response.StatusDescription)"
+                return $false
+            }
+        }
+        finally {
+            if ($session) { Remove-PSSession $session -ErrorAction SilentlyContinue }
+        }
+    }
+    catch {
+        Write-Host "[ERROR] Connection failed: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Invoke-Rollback {
+    param (
+        [string]$server,
+        [string]$deploymentRoot,
+        [string]$webApplicationName,
+        [System.Management.Automation.PSCredential]$cred
+    )
+    
+    try {
+        Write-Host "`n=== Attempting Rollback on $server ==="
+        
+        $session = New-PSSession -ComputerName $server -Credential $cred `
+                  -SessionOption (New-PSSessionOption -IdleTimeout $idleTimeoutMs) -ErrorAction Stop
+        
+        try {
+            # Verify deployment root exists
+            $deploymentRootExists = Invoke-Command -Session $session -ScriptBlock {
+                param($root) 
+                Test-Path $root
+            } -ArgumentList $deploymentRoot
+
+            if (-not $deploymentRootExists) {
+                Write-Host "[ERROR] Path does not exist: $deploymentRoot"
+                return $false
+            }
+
+            # Get deployment folders
+            $folders = Invoke-Command -Session $session -ScriptBlock {
+                param($root)
+                Get-ChildItem -Path $root -Directory |
+                Where-Object { $_.Name -match "^\d+(\.\d+)*_\d{8}\.\d{6}$" } |
+                Sort-Object { [datetime]::ParseExact($_.Name.Split('_')[1], 'ddMMyyyy.HHmmss', $null) } -Descending
+            } -ArgumentList $deploymentRoot
+
+            if ($folders.Count -gt 1) {
+                $rollbackFolder = $folders[1].FullName
+                Write-Host "Found rollback candidate: $rollbackFolder"
+                
+                # Perform rollback
+                $rollbackResult = Invoke-Command -Session $session -ScriptBlock {
+                    param($folder, $appName)
+                    try {
+                        if (-not (Get-Module WebAdministration -ErrorAction SilentlyContinue)) {
+                            Import-Module WebAdministration
+                        }
+                        if (-not (Test-Path 'IIS:\')) {
+                            New-PSDrive -Name IIS -PSProvider WebAdministration -Root 'MACHINE/WEBROOT/APPHOST' | Out-Null
+                        }
+                        
+                        $sitePath = "IIS:\Sites\Default Web Site\$appName"
+                        $currentPath = (Get-ItemProperty -Path $sitePath).physicalPath
+                        
+                        if ($currentPath -ne $folder) {
+                            Set-ItemProperty -Path $sitePath -Name physicalPath -Value $folder
+                            Write-Host "Rollback successful from $currentPath to $folder"
+                            return $true
+                        }
+                        else {
+                            Write-Host "Already pointing to rollback folder"
+                            return $false
+                        }
+                    }
+                    catch {
+                        Write-Host "Rollback failed: $($_.Exception.Message)"
+                        return $false
+                    }
+                } -ArgumentList $rollbackFolder, $webApplicationName
+                
+                return $rollbackResult
+            }
+            else {
+                Write-Host "[ERROR] No rollback folder found"
+                return $false
+            }
+        }
+        catch {
+            Write-Host "[ERROR] Rollback execution failed: $($_.Exception.Message)"
+            return $false
+        }
+        finally {
+            if ($session) { Remove-PSSession $session -ErrorAction SilentlyContinue }
+        }
+    }
+    catch {
+        Write-Host "[ERROR] Connection failed: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+# Main execution
+try {
+    $timeoutSeconds = 15
+    $idleTimeoutMs = 60000
+    
+    # Create credentials
+    $securePassword = ConvertTo-SecureString $AdminPassword -AsPlainText -Force
+    $cred = New-Object System.Management.Automation.PSCredential($AdminUserName, $securePassword)
+   
+    Write-Host "Starting health checks with parameters:"
+    Write-Host "DeploymentRoot: $DeploymentRoot"
+    Write-Host "WebApplicationName: $WebApplicationName"
+    Write-Host "Servers: $($serverList -join ', ')"
+    Write-Host "HealthCheckUrl: $HealthCheckUrl"
+
+    $appSuccess = $true
+    $appRollbackAttempted = $false
+        
+    foreach ($server in $serverList) {
+        Write-Host "`n=== Server: $server ==="
+        
+        $healthStatus = Invoke-HealthCheck -server $server -healthCheckUrl $HealthCheckUrl -cred $cred
+        
+        if (-not $healthStatus) {
+            $appSuccess = $false
+            $rollbackResult = Invoke-Rollback -server $server -deploymentRoot $DeploymentRoot `
+                -webApplicationName $WebApplicationName -cred $cred
+            
+            if ($rollbackResult) {
+                $appRollbackAttempted = $true
+                $global:anyRollbackAttempted = $true
+            }
+        }
+    }
+    
+    if ($appSuccess) {
+        Write-Host "`n[RESULT] All checks passed"
+    }
+    elseif ($appRollbackAttempted) {
+        Write-Host "`n[RESULT] Rollback attempted"
+    }
+    else {
+        Write-Host "`n[RESULT] Rollback failed"
+    }
+    
+    if (-not $appSuccess) { $global:overallSuccess = $false }
+    
+    if ($global:overallSuccess) {
+        Write-Host "`n[FINAL RESULT] All healthy"
+        exit 0
+    }
+    elseif ($global:anyRollbackAttempted) {
+        Write-Host "`n[FINAL RESULT] Some rollbacks succeeded"
+        exit 1
+    }
+    else {
+        Write-Host "`n[FINAL RESULT] All rollbacks failed"
+        exit 1
+    }
+}
+catch {
+    Write-Host "`n[CRITICAL ERROR] $($_.Exception.Message)"
+    exit 1
+}
+---------------------------------------------------------------------------------------
+- task: PowerShell@2
+  displayName: 'Health Check and Rollback'
+  inputs:
+    filePath: '$(System.DefaultWorkingDirectory)/scripts/healthcheck_rollback.ps1'
+    arguments: >
+      -DeploymentRoot '$(deploymentRoot)'
+      -WebApplicationName '$(webAppName)'
+      -Servers '$(servers)'
+      -HealthCheckUrl '$(healthCheckUrl)'
+      -AdminUserName '$(adminUserName)'
+      -AdminPassword '$(adminPassword)'
+    failOnStderr: true
+    pwsh: true
+    --------------------------------------------------------------------------------

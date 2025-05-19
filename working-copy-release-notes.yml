@@ -317,3 +317,28 @@ if ($successCount -eq $PipelineIds.Count) {
     exit 1
 }
 ====================================================
+{
+    "Pipelines": [
+        {
+            "PipelineId": 123,
+            "Config": {
+                "ApiServer": "PRODAPIDV01,PRODAPIDV02",
+                "DeploymentFolder": "Production",
+                "DNSRepoName": "ProdApiDnsExpand(true; blemain.local)",
+                "AdminLogin": "prod_admin",
+                "AdminPassword": "$(ProdAdminPassword)"
+            }
+        },
+        {
+            "PipelineId": 456,
+            "Config": {
+                "ApiServer": "PRODAPIDV03,PRODAPIDV04",
+                "DeploymentFolder": "Production",
+                "DNSRepoName": "ProdApiDnsExpand(true; blemain.local)",
+                "AdminLogin": "prod_admin_2",
+                "AdminPassword": "$(ProdAdminPassword2)"
+            }
+        }
+    ]
+}
+=====================================================================

@@ -342,3 +342,14 @@ if ($successCount -eq $PipelineIds.Count) {
     ]
 }
 =====================================================================
+# Properly split and convert pipeline IDs
+[int[]]$PipelineIds = $PipelineIds -split ',' | ForEach-Object {
+    try {
+        [int]$_.Trim()
+    }
+    catch {
+        Write-Log "Invalid Pipeline ID: $_" -level "ERROR"
+        exit 1
+    }
+}
+===============================================================

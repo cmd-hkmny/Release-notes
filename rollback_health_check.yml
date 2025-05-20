@@ -1,3 +1,17 @@
+# Loop through all stages to find PROD (after cloning)
+foreach ($phase in $phases) {
+    # Check if this is the PROD stage (adjust condition as needed)
+    if ($phase.name -like "*Production*" -or $phase.name -eq "Prod") {  
+
+        # 1. Rename tasks: Replace "Preprod" with "Prod"
+        foreach ($task in $phase.tasks) {
+            if ($task.name -like "*Preprod*") {
+                $task.name = $task.name -replace "Preprod", "Prod"
+            }
+        }
+=========================================================================================================        
+
+
 param(
     [string]$Org,
     [string]$Project,

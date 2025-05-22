@@ -1,12 +1,13 @@
 # Configuration from parameters
+# Configuration from parameters
 $servers = @(
     $($ApiServer -split ',' | 
       ForEach-Object { 
-          if (-not [string]::IsNullOrWhiteSpace($_)) { 
-              "    '$($_.Trim().Replace("'","''"))'" 
+          $trimmed = $_.Trim()
+          if (-not [string]::IsNullOrWhiteSpace($trimmed)) { 
+              "'$($trimmed.Replace("'","''"))'"
           }
-      } | 
-      Join-String -Separator ",`n")
+      }) -join ",`n"
 )
 $DeploymentRoot = "$($DeploymentRoot1.Replace("'","''"))"
 $WebApplicationName = "$($webApplicationName.Replace("'","''"))"

@@ -1,3 +1,18 @@
+# Configuration from parameters
+$servers = @(
+    $($ApiServer -split ',' | 
+      ForEach-Object { 
+          if (-not [string]::IsNullOrWhiteSpace($_)) { 
+              "    '$($_.Trim().Replace("'","''"))'" 
+          }
+      } | 
+      Join-String -Separator ",`n")
+)
+$DeploymentRoot = "$($DeploymentRoot1.Replace("'","''"))"
+$WebApplicationName = "$($webApplicationName.Replace("'","''"))"
+$healthcheckUrl = "$($healthcheckUrl1.Replace("'","''"))"
+
+===============================================================================================
 # Loop through all stages to find PROD (after cloning)
 foreach ($phase in $phases) {
     # Check if this is the PROD stage (adjust condition as needed)

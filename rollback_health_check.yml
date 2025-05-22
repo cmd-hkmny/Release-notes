@@ -89,30 +89,72 @@ foreach ($phase in $phases) {
 $folders = Invoke-Command -Session $session -ScriptBlock {
     param($root)
     
-    Write-Host "Checking deployment root: $root"
+    Write-Host "`n=== Scanning deployment root: $root ==="
+    
+    # Get all folders and show them
     $allFolders = Get-ChildItem -Path $root -Directory
-    Write-Host "Found $($allFolders.Count) total folders"
+    Write-Host "`nAll folders found ($($allFolders.Count)):"
+    $allFolders | ForEach-Object { Write-Host " - $($_.Name)" }
+    
+    # Enhanced pattern to match both:
+    # 1. Release-XX_YYYYMMDD.HHmmss or Release-XX YYYYMMDD.HHmmss
+    # 2. X.X.X.X_YYYYMMDD.HHmmss (version numbers)
+    $pattern = "^(?:Release-\d+[_ ]|(?:\d+\.)+\d+_)\d{8}\.\d{6}$"
+    Write-Host "`nApplying pattern: $pattern"
     
     $matchedFolders = $allFolders | Where-Object { 
-        $_.Name -match "^(?:Release-\d+|\d+(?:\.\d+)+)\.\d{8}\.\d{6}$"
+        if ($_.Name -match $pattern) {
+            Write-Host " [MATCH] $($_.Name)"
+            $true
+        } else {
+            Write-Host " [NO MATCH] $($_.Name)"
+            $false
+        }
     }
     
-    Write-Host "Found $($matchedFolders.Count) matching folders"
-    $matchedFolders | ForEach-Object { Write-Host " - $($_.Name)" }
-    
-    $sortedFolders = $matchedFolders | Sort-Object { 
-        $datePart = $_.Name.Split('.')[-2..-1] -join '.'
-        try {
-            [datetime]::ParseExact($datePart, 'ddMMyyyy.HHmmss', $null)
-        } catch {
-            Write-Host "Invalid date format in folder: $($_.Name)"
+    # Sort by extracted datetime
+    $sortedFolders = $matchedFolders | Sort-Object {
+        # Extract the date part (after last _)
+        if ($_.Name -match "_(\d{8}\.\d{6})$") {
+            $datePart = $matches[1]
+            try {
+                $parsedDate = [datetime]::ParseExact($datePart, 'ddMMyyyy.HHmmss', $null)
+                Write-Host " - $($_.Name) → $datePart → $parsedDate"
+                $parsedDate
+            } catch {
+                Write-Host " [DATE ERROR] $($_.Name) - Invalid date: $datePart"
+                [datetime]::MinValue
+            }
+        } else {
+            Write-Host " [DATE EXTRACTION FAILED] $($_.Name)"
             [datetime]::MinValue
         }
     } -Descending
     
+    Write-Host "`nSorted folders (newest first):"
+    $sortedFolders | ForEach-Object { Write-Host " - $($_.Name)" }
+    
     $sortedFolders
 } -ArgumentList $deploymentRoot
-  ========================
+
+# Rollback logic
+if ($folders.Count -ge 2) {
+    $current = $folders[0]
+    $rollbackTarget = $folders[1]
+    
+    Write-Host "`n=== Rollback Selection ==="
+    Write-Host "Current Version: $($current.Name)"
+    Write-Host "Rollback Target: $($rollbackTarget.Name)"
+    Write-Host "Full Path: $($rollbackTarget.FullName)"
+    
+    # Return the rollback target path
+    $rollbackTarget.FullName
+} else {
+    $msg = "Not enough versions for rollback (found $($folders.Count), need at least 2)"
+    Write-Host "##[error] $msg"
+    throw $msg
+}
+========================
   $folders = Invoke-Command -Session $session -ScriptBlock {
     param($root)
     

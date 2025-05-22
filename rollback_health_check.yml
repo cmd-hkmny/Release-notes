@@ -1,4 +1,3 @@
-# Configuration from parameters
 function Add-HealthcheckTask {
     param(
         [object]$phase,
@@ -16,11 +15,17 @@ function Add-HealthcheckTask {
     $WebApplicationName = $config.DNSRepoName
     $HealthcheckUrl = $config.healthcheckUrl
 
-    # Convert values to JSON strings (safe for single quotes)
+    # Convert values to compressed JSON
     $serversJson = ($ApiServer -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) | ConvertTo-Json -Compress
     $deploymentRootJson = $DeploymentRoot | ConvertTo-Json -Compress
     $webAppNameJson = $WebApplicationName | ConvertTo-Json -Compress
     $healthcheckUrlJson = $HealthcheckUrl | ConvertTo-Json -Compress
+
+    # Convert to Base64
+    $base64Servers = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($serversJson))
+    $base64DeploymentRoot = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($deploymentRootJson))
+    $base64WebAppName = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($webAppNameJson))
+    $base64HealthcheckUrl = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($healthcheckUrlJson))
 
     $healthCheckTask = @{
         taskId = "e213ff0f-5d5c-4791-802d-52ea3e7be1f1"
@@ -30,18 +35,18 @@ function Add-HealthcheckTask {
         inputs = @{
             targetType = "inline"
             script = @'
-# Decode configuration from JSON
+# Decode configuration from Base64
 $config = @{
-    Servers = $([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('BASE64_SERVERS')) | ConvertFrom-Json
-    DeploymentRoot = $([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('BASE64_DEPLOYMENT_ROOT'))) | ConvertFrom-Json
-    WebApplicationName = $([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('BASE64_WEBAPP_NAME'))) | ConvertFrom-Json
-    HealthcheckUrl = $([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('BASE64_HEALTHCHECK_URL'))) | ConvertFrom-Json
+    Servers = ([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('BASE64_SERVERS'))) | ConvertFrom-Json
+    DeploymentRoot = ([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('BASE64_DEPLOYMENT_ROOT'))) | ConvertFrom-Json
+    WebApplicationName = ([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('BASE64_WEBAPP_NAME'))) | ConvertFrom-Json
+    HealthcheckUrl = ([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('BASE64_HEALTHCHECK_URL'))) | ConvertFrom-Json
 }
 
 # Enable TLS 1.2
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-# Initialize variables from config
+# Initialize variables
 $servers = $config.Servers
 $DeploymentRoot = $config.DeploymentRoot
 $WebApplicationName = $config.WebApplicationName
@@ -56,10 +61,10 @@ Write-Host "Web Application: $WebApplicationName"
 Write-Host "Healthcheck URL: $healthcheckUrl"
 
 # Rest of your healthcheck script...
-'@ -replace 'BASE64_SERVERS', [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($serversJson)) `
-              -replace 'BASE64_DEPLOYMENT_ROOT', [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($deploymentRootJson)) `
-              -replace 'BASE64_WEBAPP_NAME', [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($webAppNameJson)) `
-              -replace 'BASE64_HEALTHCHECK_URL', [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($healthcheckUrlJson))
+'@ -replace 'BASE64_SERVERS', $base64Servers `
+              -replace 'BASE64_DEPLOYMENT_ROOT', $base64DeploymentRoot `
+              -replace 'BASE64_WEBAPP_NAME', $base64WebAppName `
+              -replace 'BASE64_HEALTHCHECK_URL', $base64HealthcheckUrl
             pwsh = "true"
         }
     }

@@ -1,18 +1,48 @@
 # Configuration from parameters
-# Configuration from parameters
-$servers = @(
-    $($ApiServer -split ',' | 
-      ForEach-Object { 
-          $trimmed = $_.Trim()
-          if (-not [string]::IsNullOrWhiteSpace($trimmed)) { 
-              "'$($trimmed.Replace("'","''"))'"
-          }
-      }) -join ",`n"
-)
-$DeploymentRoot = "$($DeploymentRoot1.Replace("'","''"))"
-$WebApplicationName = "$($webApplicationName.Replace("'","''"))"
-$healthcheckUrl = "$($healthcheckUrl1.Replace("'","''"))"
+# Extract values with null checks
+    $ApiServer = $config.ApiServer
+    $DeploymentRoot = $config.DeploymentRoot
+    $WebApplicationName = $config.DNSRepoName
+    $HealthcheckUrl = $config.healthcheckUrl
 
+    # Convert values to JSON strings to safely embed them
+    $serversJson = ($ApiServer -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) | ConvertTo-Json
+    $deploymentRootJson = $DeploymentRoot | ConvertTo-Json
+    $webAppNameJson = $WebApplicationName | ConvertTo-Json
+    $healthcheckUrlJson = $HealthcheckUrl | ConvertTo-Json
+
+    $healthCheckTask = @{
+        taskId = "e213ff0f-5d5c-4791-802d-52ea3e7be1f1"
+        version = "2.*"
+        name = "HealthcheckAndRollback"
+        enabled = $true
+        inputs = @{
+            targetType = "inline"
+            script = @"
+# Decode configuration from JSON
+`$config = @{
+    Servers = $serversJson | ConvertFrom-Json
+    DeploymentRoot = $deploymentRootJson | ConvertFrom-Json
+    WebApplicationName = $webAppNameJson | ConvertFrom-Json
+    HealthcheckUrl = $healthcheckUrlJson | ConvertFrom-Json
+}
+
+# Enable TLS 1.2
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+# Initialize variables from config
+`$servers = `$config.Servers
+`$DeploymentRoot = `$config.DeploymentRoot
+`$WebApplicationName = `$config.WebApplicationName
+`$healthcheckUrl = `$config.HealthcheckUrl
+`$timeoutSeconds = 15
+
+# Debug output
+Write-Host "=== Configuration ==="
+Write-Host "Servers: `$(`$servers -join ', ')"
+Write-Host "Deployment Root: `$DeploymentRoot"
+Write-Host "Web Application: `$WebApplicationName"
+Write-Host "Healthcheck URL: `$healthcheckUrl"
 ===============================================================================================
 # Loop through all stages to find PROD (after cloning)
 foreach ($phase in $phases) {

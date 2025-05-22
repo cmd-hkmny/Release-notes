@@ -1500,3 +1500,24 @@ function Invoke-Rollback {
     }
 }
 ________________________________________________________________________________________________
+$servers = @(
+    $(([string]$ApiServer -split ',') | 
+      ForEach-Object { 
+          if (-not [string]::IsNullOrWhiteSpace($_)) { 
+              "    '$($_.Trim() -replace "'","''")'" 
+          }
+      } | 
+      Join-String -Separator ",`n")
+)
+$DeploymentRoot = '$($DeploymentRoot1 -replace "'","''")'
+$WebApplicationName = '$($webApplicationName -replace "'","''")'
+$healthcheckUrl = '$($healthcheckUrl1 -replace "'","''")'
+$timeoutSeconds = 15
+
+# Debug output
+Write-Host "=== Configuration ==="
+Write-Host "Servers: $($servers -join ', ')"
+Write-Host "Deployment Root: $DeploymentRoot"
+Write-Host "Web Application: $WebApplicationName"
+Write-Host "Healthcheck URL: $healthcheckUrl"
+===========================================================================================

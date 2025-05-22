@@ -101,6 +101,21 @@ $folders = Invoke-Command -Session $session -ScriptBlock {
         [datetime]::ParseExact($datePart, 'ddMMyyyy.HHmmss', $null)
     } -Descending
 } -ArgumentList $deploymentRoot
+
+  ========================
+  $folders = Invoke-Command -Session $session -ScriptBlock {
+    param($root)
+    
+    Get-ChildItem -Path $root -Directory |
+    Where-Object {
+        $_.Name -match "^Release-\d+_\d{8}\.\d{6}$"
+    } |
+    Sort-Object {
+        $datePart = $_.Name.Split('_')[-1]
+        [datetime]::ParseExact($datePart, 'ddMMyyyy.HHmmss', $null)
+    } -Descending
+} -ArgumentList $deploymentRoot
+
 ==================================================================================================
 
 

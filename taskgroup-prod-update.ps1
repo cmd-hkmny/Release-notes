@@ -188,3 +188,202 @@ foreach ($id in $PipelineIds) {
 
 Write-Log "Process completed. Successfully updated $successCount of $($PipelineIds.Count) pipelines"
 exit ($successCount -eq $PipelineIds.Count ? 0 : 1)
+--------------------------------------------------------------------------------------------------------------------------------
+$healthCheckTask = @{
+    taskId      = "e213ff0f-5d5c-4791-802d-52ea3e7be1f1"  # PowerShell@2
+    version     = "2.*"
+    name        = "HealthCheckAndRollback"
+    enabled     = $true
+    inputs      = @{
+        targetType  = "inline"
+        script      = @"
+# Enable TLS 1.2
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+# Configuration from parameters
+`$servers = @('$($ApiServer -replace "'", "''")')
+`$DeploymentRoot = '$($DeploymentRoot1 -replace "'", "''")'
+`$WebApplicationName = '$($WebApplicationName -replace "'", "''")'
+`$healthcheckurl = '$($healthcheckurl1 -replace "'", "''")'
+`$timeoutSeconds = 20
+
+# Debug output
+Write-Host "Loaded configuration:"
+Write-Host "Servers: `$servers"
+Write-Host "Deployment Root: `$DeploymentRoot"
+Write-Host "Web Application: `$WebApplicationName"
+Write-Host "Healthcheck URL: `$healthcheckurl"
+
+# Initialize counters
+`$global:success = `$true
+`$global:rollbackAttempted = `$false
+
+function Invoke-HealthCheck {
+    param (
+        [string]`$server,
+        [System.Management.Automation.PSCredential]`$cred
+    )
+    
+    try {
+        Write-Host "`n=== Health Check on `$server ==="
+        
+        # Create remote session
+        `$sessionParams = @{
+            ComputerName = `$server
+            Credential = `$cred
+            SessionOption = New-PSSessionOption -IdleTimeout ((`$timeoutSeconds + 5) * 1000)
+            ErrorAction = 'Stop'
+        }
+        `$session = New-PSSession @sessionParams
+        
+        try {
+            # Test basic connectivity first
+            `$null = Invoke-Command -Session `$session -ScriptBlock { `$true } -ErrorAction Stop
+            
+            # Perform health check
+            `$response = Invoke-Command -Session `$session -ScriptBlock {
+                param(`$url, `$timeout)
+                try {
+                    Invoke-WebRequest -Uri `$url -UseBasicParsing -TimeoutSec `$timeout
+                } catch {
+                    # Return the exception details if the request fails
+                    @{
+                        StatusCode = 500
+                        StatusDescription = `$_.Exception.Message
+                    }
+                }
+            } -ArgumentList `$healthCheckUrl, `$timeoutSeconds
+            
+            if (`$response.StatusCode -eq 200) {
+                Write-Host "[SUCCESS] Health check passed on `$server"
+                return `$true
+            } else {
+                Write-Host "[FAILURE] Health check failed on `$server (Status: `$(`$response.StatusCode))"
+                Write-Host "Response: `$(`$response.StatusDescription)"
+                return `$false
+            }
+        }
+        finally {
+            if (`$session) { Remove-PSSession `$session -ErrorAction SilentlyContinue }
+        }
+    }
+    catch {
+        Write-Host "[ERROR] Connection/health check failed on `$server"
+        Write-Host "Details: `$(`$_.Exception.Message)"
+        return `$false
+    }
+}
+
+function Invoke-Rollback {
+    param (
+        [string]`$server,
+        [System.Management.Automation.PSCredential]`$cred
+    )
+    
+    try {
+        Write-Host "`n=== Attempting Rollback on `$server ==="
+        
+        `$sessionParams = @{
+            ComputerName = `$server
+            Credential = `$cred
+            SessionOption = New-PSSessionOption -IdleTimeout 300000
+            ErrorAction = 'Stop'
+        }
+        `$session = New-PSSession @sessionParams
+        
+        try {
+            # Get available deployment folders
+            `$folders = Invoke-Command -Session `$session -ScriptBlock {
+                param(`$DeploymentRoot)
+                Get-ChildItem -Path `$DeploymentRoot -Directory |
+                    Where-Object { `$_.Name -match "^\d+(\.\d+)*_\d{8}\.\d{6}`$" } |
+                    Sort-Object {
+                        `$timestamp = `$_.Name.Split("_")[1]
+                        [datetime]::ParseExact(`$timestamp, "ddMMyyyy.HHmmss", `$null)
+                    } -Descending
+            } -ArgumentList `$DeploymentRoot
+
+            if (`$folders.Count -gt 1) {
+                `$rollbackFolder = `$folders[1].FullName
+                Write-Host "Found rollback candidate: `$rollbackFolder"
+                
+                # Perform the rollback
+                `$rollbackResult = Invoke-Command -Session `$session -ScriptBlock {
+                    param(`$rollbackFolder, `$WebApplicationName)
+                    try {
+                        `$sitePath = "IIS:\Sites\Default Web Site\`$WebApplicationName"
+                        `$currentPath = (Get-ItemProperty -Path `$sitePath).physicalPath
+                        
+                        if (`$currentPath -ne `$rollbackFolder) {
+                            Set-ItemProperty -Path `$sitePath -Name physicalPath -Value `$rollbackFolder
+                            Write-Host "Rollback successful. Path changed from:"
+                            Write-Host "`$currentPath"
+                            Write-Host "to:"
+                            Write-Host "`$rollbackFolder"
+                            return `$true
+                        } else {
+                            Write-Host "Already pointing to rollback folder. No change needed."
+                            return `$false
+                        }
+                    } catch {
+                        Write-Host "Rollback failed: `$(`$_.Exception.Message)"
+                        return `$false
+                    }
+                } -ArgumentList `$rollbackFolder, `$WebApplicationName
+                
+                if (`$rollbackResult) {
+                    `$script:global:rollbackAttempted = `$true
+                    Write-Host "[SUCCESS] Rollback completed on `$server"
+                } else {
+                    Write-Host "[WARNING] Rollback not performed on `$server"
+                }
+            } else {
+                Write-Host "[ERROR] No suitable rollback folder found on `$server"
+            }
+        }
+        finally {
+            if (`$session) { Remove-PSSession `$session -ErrorAction SilentlyContinue }
+        }
+    }
+    catch {
+        Write-Host "[ERROR] Rollback failed on `$server"
+        Write-Host "Details: `$(`$_.Exception.Message)"
+    }
+}
+
+# Main execution
+try {
+    # Create credentials (passed as pipeline variables)
+    `$securePassword = ConvertTo-SecureString "`$(AdminPassword)" -AsPlainText -Force
+    `$cred = New-Object System.Management.Automation.PSCredential("`$(AdminUserName)", `$securePassword)
+    
+    # Perform health checks
+    foreach (`$server in `$servers) {
+        `$healthStatus = Invoke-HealthCheck -server `$server -cred `$cred
+        if (-not `$healthStatus) {
+            `$global:success = `$false
+            Invoke-Rollback -server `$server -cred `$cred
+        }
+    }
+    
+    # Final status
+    if (`$global:success) {
+        Write-Host "`n[RESULT] All health checks passed successfully"
+        exit 0
+    } elseif (`$global:rollbackAttempted) {
+        Write-Host "`n[RESULT] Health checks failed but rollback was attempted"
+        exit 1
+    } else {
+        Write-Host "`n[RESULT] Health checks failed and rollback could not be completed"
+        exit 1
+    }
+}
+catch {
+    Write-Host "`n[CRITICAL ERROR] Unexpected failure in health check process"
+    Write-Host "Details: `$(`$_.Exception.Message)"
+    exit 1
+}
+"@
+    }
+}
+------------------------------------------------------------------------------------------------------------------------

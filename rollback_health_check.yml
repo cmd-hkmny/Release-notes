@@ -88,20 +88,30 @@ foreach ($phase in $phases) {
 # Get deployment folders
 $folders = Invoke-Command -Session $session -ScriptBlock {
     param($root)
-    Get-ChildItem -Path $root -Directory |
-    Where-Object { 
-        # Matches:
-        # - "Release-01.01012023.120000"
-        # - "1.1.1.11.01012023.120000"
+    
+    Write-Host "Checking deployment root: $root"
+    $allFolders = Get-ChildItem -Path $root -Directory
+    Write-Host "Found $($allFolders.Count) total folders"
+    
+    $matchedFolders = $allFolders | Where-Object { 
         $_.Name -match "^(?:Release-\d+|\d+(?:\.\d+)+)\.\d{8}\.\d{6}$"
-    } |
-    Sort-Object { 
-        # Extract datetime part (last segment after last '.')
+    }
+    
+    Write-Host "Found $($matchedFolders.Count) matching folders"
+    $matchedFolders | ForEach-Object { Write-Host " - $($_.Name)" }
+    
+    $sortedFolders = $matchedFolders | Sort-Object { 
         $datePart = $_.Name.Split('.')[-2..-1] -join '.'
-        [datetime]::ParseExact($datePart, 'ddMMyyyy.HHmmss', $null)
+        try {
+            [datetime]::ParseExact($datePart, 'ddMMyyyy.HHmmss', $null)
+        } catch {
+            Write-Host "Invalid date format in folder: $($_.Name)"
+            [datetime]::MinValue
+        }
     } -Descending
+    
+    $sortedFolders
 } -ArgumentList $deploymentRoot
-
   ========================
   $folders = Invoke-Command -Session $session -ScriptBlock {
     param($root)
